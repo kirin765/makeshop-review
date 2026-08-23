@@ -1,0 +1,176 @@
+# 설치·재접속 테스트 가이드
+
+> 메이크샵 앱 "리뷰이사"(`makeshop-review`)의 **설치 / 재접속("앱 관리하기")** 플로우 테스트 절차서.
+> 다른 에이전트가 이 문서만 읽고 실행할 수 있게 모든 절차와 함정을 적었다.
+
+---
+
+## 1. 앱 개요
+
+| 항목 | 값 |
+|---|---|
+| 프로젝트 | `makeshop-review` (Next.js App Router, Vercel) |
+| 프로덕션 URL | **https://makeshop-review-gamma.vercel.app** |
+| 메이크샵 client_id | `08368787-0c51-4a6b-a4af-714154b9fc5d` |
+| client_secret | `.env`의 `MAKESHOP_CLIENT_SECRET` |
+| APP URL | `https://makeshop-review-gamma.vercel.app/` (루트) |
+| 테스트 몰 | `hello765` (파트너 기본 몰) |
+| API 경유 | 홈서버 프록시 `https://makeshop-proxy.sajangbu.com` (egress = 등록 IP 218.237.176.17) |
+| DB | Vercel env `DATABASE_URL` (Neon Postgres) — 토큰 캐시·사용량 |
+
+**핵심 코드 파일**
+
+- 설치 진입·hmac 검증·세션: `src/lib/launch.ts`, `src/app/api/auth/launch/route.ts`, `src/app/page.tsx`
+- 토큰 발급·캐시: `src/lib/makeshop.ts`, `src/lib/token.ts`, `src/lib/store.ts`
+- 상품/후기 API: `src/app/api/products/route.ts`, `src/app/api/reviews/route.ts`
+
+---
+
+## 2. 메이크샵 설치 연동 개요 (공식 문서 실측 2026-08-13)
+
+메이크샵은 **OAuth가 없다.** 설치와 재접속이 모두 APP URL로
+`?shop_uid={shop_uid}&timestamp={timestamp}&action_type={action_type}&hmac={hmac}`을 GET으로 보낸다.
+
+**HMAC 규칙 (docs/guide/app/install):**
+
+```
+signMessage = {shop_uid}:{timestamp}:{action_type}   ← 콜론 구분
+hmac        = HMAC-SHA256(signMessage, CLIENT_SECRET) → hex
+timestamp   = Unix epoch **밀리초**, 현재와 ±5분(300,000ms) 안
+```
+
+> 🚨 **카페24와 반대다.**
+> - 카페24: 정렬된 쿼리스트링 전체 + base64 + ±2시간
+> - 메이크샵: `shop_uid:timestamp:action_type` 3개만 + **hex** + ±5분(ms)
+> 포팅할 때 옛 코드를 그대로 가져오면 안 된다.
+
+**토큰 (docs/guide/app/access-token):**
+
+```
+POST https://connect.makeshop.co.kr/oauth/token
+Authorization: Basic base64(client_id:client_secret)
+Content-Type: application/x-www-form-urlencoded
+grant_type=client_credentials&shop_uid={shop_uid}
+→ data.access_token (5분 유효), data.expires_in
+```
+
+- **5분 유효**, **(shop_uid, IP)당 1분 최대 5회** — 캐시 필수. `getValidToken`이 DB에서 60초 skew로 재발급.
+- 리프레시 토큰 없음. 재발급 = 재발급.
+- ⚠️ **접근 허용 IP**: 개발정보 관리에 등록된 IP에서만 API 열림(최대 10개). Vercel egress IP를 등록해야 한다.
+
+**상점 설치 앱 정보 조회 (선택):**
+```
+GET https://connect.makeshop.co.kr/api/application/{shop_uid}/apps?client_id={client_id}
+→ data.installed_at, data.expired_at
+```
+
+---
+
+## 3. 테스트 환경 준비
+
+### 3.1 로컬 환경변수 (`.env.local`)
+
+```
+MAKESHOP_CLIENT_ID=
+MAKESHOP_CLIENT_SECRET=
+MAKESHOP_APP_URL=https://<prod>/
+MAKESHOP_SESSION_SECRET=<랜덤>
+DATABASE_URL=
+```
+
+### 3.2 접근 허용 IP 확인
+
+메이크샵 API는 개발정보 관리의 **접근 허용 IP**에 등록된 IP에서만 호출된다.
+로컬 개발은 집 공인 IP를, 운영은 Vercel egress IP를 등록해야 한다.
+
+```bash
+curl -s https://api.ipify.org   # 로컬 공인 IP
+```
+
+### 3.3 빌드·배포
+
+```bash
+npm run build
+VERCEL_ORG_ID=$ORG VERCEL_PROJECT_ID=$PROJ npx vercel deploy --prod --yes
+```
+
+---
+
+## 4. hmac 검증 (앱 실행 URL 만들기)
+
+개발자센터 → 상품 > App > 개발정보 관리 → 하단 **테스트 실행**이 진짜 설치 흐름이다.
+수동 확인이 필요하면 아래 스크립트로 APP URL을 만들어 붙인다.
+
+```bash
+node -e '
+const { createHmac } = require("crypto");
+const SECRET = "<client_secret>";
+const shopUid = "<테스트 shop_uid>";
+const ts = Date.now();  // 밀리초
+const actionType = "install";
+const msg = `${shopUid}:${ts}:${actionType}`;
+const hmac = createHmac("sha256", SECRET).update(msg).digest("hex");
+console.log(`https://<prod>/?shop_uid=${shopUid}&timestamp=${ts}&action_type=${actionType}&hmac=${hmac}`);
+'
+```
+
+**예상 응답:**
+- hmac 일치 + timestamp 신선 → `307 Location: /admin` (세션 발급)
+- hmac 불일치 → `401 {"error":"invalid launch request"}`
+- timestamp 5분 초과 → `401`
+
+---
+
+## 5. 테스트 시나리오
+
+### 5.1 시나리오 A — 최초 설치 완주
+
+1. 파트너센터 → 상품 > App > 개발정보 관리 → **테스트 실행**
+2. APP URL(`/` → `/api/auth/launch`) 호출 → hmac 통과 → `/admin` 307
+3. `/admin`이 "리뷰 옮기기" UI + shop_uid + 상품 목록 표시
+4. `curl /api/diag/token?shop_uid=...` → `hasToken:true`
+
+**통과 기준**: 상품 목록이 채워진다 (토큰 발급 + 상품 API 통과).
+
+### 5.2 시나리오 B — 재접속 (앱 관리하기)
+
+1. shop_uid 세션이 살아있는 상태에서 APP URL 재호출
+2. **통과 기준**: OAuth가 없으므로 항상 hmac 재검증 → `/admin` 직행. 테스트 설치 한도 같은 것이 없다.
+
+### 5.3 시나리오 C — 후기 등록 (핵심)
+
+1. `/admin`에서 상품 선택 + 샘플 엑셀(`/sample-reviews.xlsx`) 업로드
+2. **미리보기** → 파싱 건수 확인
+3. **옮기기** → `written` 수 증가
+4. **통과 기준**: 메이크샵 관리자 → 상품 → 해당 상품 상세 후기 탭에 등록 확인.
+   작성자명이 `****` 마스킹돼 있고 별점이 들어가 있는지 확인.
+
+### 5.4 시나리오 D — 무료 20건 소진
+
+1. 20건 초과 업로드 → 402 + `quotaExceeded`
+2. 사용량 확인: `curl /api/diag/token` 확장 전, DB `usage_counter` 조회
+
+---
+
+## 6. 알려진 함정
+
+| # | 함정 | 증상 | 해결 |
+|---|---|---|---|
+| 1 | **접근 허용 IP 미등록** | 토큰 발급은 되는데 API가 403/401 | 개발정보 관리에 Vercel IP 등록 |
+| 2 | 토큰 rate limit(1분 5회) | 발급 실패 | `getValidToken`이 DB 캐시(5분)로 재사용 — 최초 1회만 발급 |
+| 3 | 카페24 코드 재사용 | hmac 불일치 401 | 메이크샵은 `shop_uid:ts:action` + hex + ±5분(ms) |
+| 4 | timestamp 초 단위로 서명 | 401 | **밀리초**여야 한다 (`Date.now()`) |
+| 5 | `review/store` 배치로 보냄 | 400 | **1건/호출**이다 |
+| 6 | reg_date 형식 오류 | 등록 실패 | `YYYY-MM-DD HH:mm:ss` |
+| 7 | score_1만 별점 노출인지 미확정 | 별점 안 보일 수 있음 | 첫 실측으로 확정 |
+
+---
+
+## 7. 심사 재요청 전 체크리스트
+
+- [ ] 접근 허용 IP에 Vercel egress IP 등록 (운영 필수)
+- [ ] 시나리오 A (설치 완주) 통과 — 상품 목록 표시
+- [ ] 시나리오 C (후기 등록) 통과 — 관리자 화면에서 확인
+- [ ] 시나리오 D (20건 소진) 통과
+- [ ] 진단 라우트(`/api/diag/*`) 제거
+- [ ] `SUBMIT.md` 갱신, 변경 커밋 + push
