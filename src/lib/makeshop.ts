@@ -3,9 +3,9 @@ const CLIENT_SECRET = process.env.MAKESHOP_CLIENT_SECRET || '';
 
 /**
  * API 베이스. 메이크샵은 **접근 허용 IP에 등록된 IP에서만** API가 열린다(최대 10개).
- * Vercel 서버리스 egress는 유동 IP라 등록 불가 → 운영은 홈 공인 IP(218.237.176.17)에서
+ * Vercel 서버리스 egress는 유동 IP라 등록 불가 → 운영은 홈 공인 IP(61.254.69.43, 2026-08-26 LAN 변경)에서
  * egress하는 홈서버 프록시(makeshop-proxy.sajangbu.com)를 경유한다 (고도몰 godo-proxy와 동일 패턴).
- * 로컬 개발은 집 IP가 등록돼 있어 원본을 직접 쓴다.
+ * 로컬 개발도 이 프록시를 경유한다. 원본 직접 호출 시 집 공인 IP가 접근 허용 IP에 등록돼 있어야 한다.
  */
 export const API_BASE =
   process.env.MAKESHOP_API_BASE || 'https://connect.makeshop.co.kr';

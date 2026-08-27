@@ -15,7 +15,7 @@
 | client_secret | `.env`의 `MAKESHOP_CLIENT_SECRET` |
 | APP URL | `https://makeshop-review-gamma.vercel.app/` (루트) |
 | 테스트 몰 | `hello765` (파트너 기본 몰) |
-| API 경유 | 홈서버 프록시 `https://makeshop-proxy.sajangbu.com` (egress = 등록 IP 218.237.176.17) |
+| API 경유 | 홈서버 프록시 `https://makeshop-proxy.sajangbu.com` (egress = 등록 IP 61.254.69.43 — 2026-08-26 LAN 변경으로 변경, 재등록 필요. 이전: 218.237.176.17) |
 | DB | Vercel env `DATABASE_URL` (Neon Postgres) — 토큰 캐시·사용량 |
 
 **핵심 코드 파일**
@@ -82,6 +82,7 @@ DATABASE_URL=
 
 메이크샵 API는 개발정보 관리의 **접근 허용 IP**에 등록된 IP에서만 호출된다.
 로컬 개발은 집 공인 IP를, 운영은 Vercel egress IP를 등록해야 한다.
+(2026-08-26 LAN 변경: 홈 공인 IP가 `218.237.176.17` → `61.254.69.43`으로 바뀜 — 개발자센터에 재등록 필요)
 
 ```bash
 curl -s https://api.ipify.org   # 로컬 공인 IP

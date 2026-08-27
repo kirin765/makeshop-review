@@ -78,7 +78,7 @@
 ```
 Vercel (makeshop-review-gamma) ──HTTPS──▶ makeshop-proxy.sajangbu.com (cloudflared)
                                               └─▶ ubuntu-lg:8082 (node proxy)
-                                                   └─▶ connect.makeshop.co.kr (egress=218.237.176.17)
+                                                   └─▶ connect.makeshop.co.kr (egress=61.254.69.43)
 ```
 
 Vercel egress는 유동 IP라 메이크샵 접근 허용 IP(최대 10개)에 등록 불가 → 홈 공인 IP에서
@@ -90,7 +90,7 @@ egress하는 홈서버 프록시를 경유한다 (고도몰 godo-proxy와 동일
 | # | 항목 | 상태 |
 |---|---|---|
 | 1 | 메이크샵 앱 client_id·client_secret | ✅ `08368787-...` / `.env` (2026-08-13) |
-| 2 | **접근 허용 IP** | ✅ `218.237.176.17` 등록 (2026-08-13) |
+| 2 | **접근 허용 IP** | ⚠️ `61.254.69.43` 재등록 필요 (2026-08-26 LAN 변경으로 egress IP 변경 — 이전 `218.237.176.17`) |
 | 3 | APP URL | ✅ `https://makeshop-review-gamma.vercel.app/` |
 | 4 | **API egress 프록시** | ✅ 홈서버(ubuntu-lg) 8082 + cloudflared `makeshop-proxy.sajangbu.com` |
 | 5 | 테스트 몰 | ✅ `hello765` — 설치·토큰·상품·후기 실측 통과 (2026-08-13) |
