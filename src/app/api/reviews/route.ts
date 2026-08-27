@@ -3,7 +3,7 @@ import { sessionShop } from '@/lib/launch';
 import { getValidToken } from '@/lib/token';
 import { createReview } from '@/lib/makeshop';
 import { parseReviewFile, toDateTime, type ImportedReview } from '@/lib/reviewImport';
-import { checkQuota, addUsage } from '@/lib/quota';
+import { checkQuota, addUsage, FREE_LIMIT } from '@/lib/quota';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -57,7 +57,11 @@ export async function POST(req: NextRequest) {
 
   const quota = await checkQuota(shopUid, reviews.length);
   if (quota.allowed <= 0) {
-    return NextResponse.json({ quotaExceeded: true, used: quota.used, error: 'free limit reached' }, { status: 402 });
+    // 무료체험 만료(기간 종료·환불)면 paywall 신호를 실어 402로 막는다.
+    return NextResponse.json(
+      { quotaExceeded: true, paywall: quota.paywall, used: quota.used, expiredAt: quota.expiredAt, error: 'free limit reached' },
+      { status: 402 },
+    );
   }
 
   const token = await getValidToken(shopUid);
@@ -80,7 +84,7 @@ export async function POST(req: NextRequest) {
 
   if (!quota.paid) await addUsage(shopUid, written);
 
-  const remaining = quota.paid ? null : Math.max(0, 20 - quota.used - written);
+  const remaining = quota.paid ? null : Math.max(0, FREE_LIMIT - quota.used - written);
   return NextResponse.json({
     parsed: reviews.length,
     written,

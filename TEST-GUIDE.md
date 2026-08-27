@@ -61,8 +61,20 @@ grant_type=client_credentials&shop_uid={shop_uid}
 **상점 설치 앱 정보 조회 (선택):**
 ```
 GET https://connect.makeshop.co.kr/api/application/{shop_uid}/apps?client_id={client_id}
-→ data.installed_at, data.expired_at
+→ data.installed_at, data.expired_at   (expired_at: 설치 시 무료체험 기간에 따라 자동 결정)
 ```
+
+**유료앱 결제/환불 콜백 (docs/guide/app/orders-callback-api — 심사 필수):**
+```
+POST https://connect.makeshop.co.kr/api/application/{shop_uid}/callback/payment   → 성공 201
+POST https://connect.makeshop.co.kr/api/application/{shop_uid}/callback/refund    → 성공 201
+body: { client_id, partner_order_uid, amount, payment_method, expired_at?("YYYYMMDD"), refund_reason? }
+```
+- `expired_at`은 결제/환불 관계없이 **앱 설치 만료일로 강제 덮어쓰기**된다.
+- 액세스 토큰 발급 시 사용한 client_id·shop_uid와 동일해야 올바른 설치 정보를 조회할 수 있다.
+- 무료체험 종료/만료 후 이용 제한은 파트너사(우리)가 자체 처리한다 → `quota.ts` 402 paywall.
+- 앱 내 구현: `src/lib/billing.ts` (`processPayment`·`processRefund`), 엔드포인트 `/api/billing/payment`·`/api/billing/refund`
+  (`MAKESHOP_BILLING_KEY` 미설정 = 상점 세션 허용 데모 모드, 설정 = PG 웹훅 전용).
 
 ---
 
@@ -151,6 +163,39 @@ console.log(`https://<prod>/?shop_uid=${shopUid}&timestamp=${ts}&action_type=${a
 1. 20건 초과 업로드 → 402 + `quotaExceeded`
 2. 사용량 확인: `curl /api/diag/token` 확장 전, DB `usage_counter` 조회
 
+### 5.5 시나리오 E — 무료체험 기간(만료) enforcement
+
+1. 설치 직후 `/api/billing` → `subscription.status = trial`, `expiredAt` = 설치일 + 14일(개발자센터 설정과 일치)
+2. DB에서 `makeshop_subscription.expired_at`을 과거로 강제 변경 (또는 실제 기간 경과):
+   ```sql
+   update makeshop_subscription set expired_at = now() - interval '1 day', updated_at = now() - interval '1 day'
+   where shop_uid = '<test shop_uid>';
+   ```
+3. 후기 업로드 시도 → **402 + `paywall:true`** — 결제 안내 화면 표시
+4. ✅ 앱 자체 20건 카운터는 무료체험 기간 안에서만 동작 (trial 상태에서 20건 초과 → 402)
+
+### 5.6 시나리오 F — 결제 → 콜백 201 → 만료일 갱신 (심사 핵심)
+
+1. 402 paywall 상태에서 `/admin`의 **결제하고 계속 이용하기** 클릭
+   (또는 `curl -X POST /api/billing/payment -H 'Content-Type: application/json' -d '{"payment_method":"CARD"}'`)
+2. **통과 기준**:
+   - 응답 `status: "paid"`, `expiredAt` = 오늘 + 30일
+   - 메이크샵 결제 콜백이 **HTTP 201** (로컬 `makeshop_billing.callback_status = 201`)
+   - `GET /api/application/{shop_uid}/apps`의 `expired_at`이 새 만료일로 덮어써짐
+   - 후기 업로드가 다시 동작 (paid = 횟수 제한 없음)
+3. 파트너센터 어드민 > 판매관리 > 주문 내역에 결제 건 표시 (callback 연동 확인)
+
+### 5.7 시나리오 G — 환불 → 콜백 201 → 즉시 차단
+
+1. `curl -X POST /api/billing/refund -H 'Content-Type: application/json' `
+   `-d '{"payment_method":"CARD","refund_reason":"더 이상 사용하지 않습니다."}'`
+2. **통과 기준**:
+   - 응답 `status: "expired"`
+   - refund 콜백 **HTTP 201**, `expired_at` = 오늘(즉시 만료)
+   - 파트너센터 어드민 > 판매관리 > 환불 내역에 환불 건 표시
+   - 후기 업로드 → 402 paywall (환불 후 재사용 불가)
+3. 환불 후 재결제하면 시나리오 F와 동일하게 복구된다
+
 ---
 
 ## 6. 알려진 함정
@@ -167,11 +212,14 @@ console.log(`https://<prod>/?shop_uid=${shopUid}&timestamp=${ts}&action_type=${a
 
 ---
 
-## 7. 심사 재요청 전 체크리스트
+## 7. 심사 재요청 전 체크리스트 (무료앱 → 유료앱 전환)
 
 - [ ] 접근 허용 IP에 Vercel egress IP 등록 (운영 필수)
+- [ ] 파트너센터 판매 정보: 결제 방식 **유료 — 파트너 결제** + **무료체험 14일** + 가격(월 9,900원) 설정
 - [ ] 시나리오 A (설치 완주) 통과 — 상품 목록 표시
 - [ ] 시나리오 C (후기 등록) 통과 — 관리자 화면에서 확인
-- [ ] 시나리오 D (20건 소진) 통과
+- [ ] 시나리오 E (무료체험 만료 → 402 paywall) 통과
+- [ ] 시나리오 F (결제 → 콜백 201 → 만료일 갱신) 통과 — **심사 승인 조건**
+- [ ] 시나리오 G (환불 → 콜백 201 → 즉시 차단) 통과
 - [ ] 진단 라우트(`/api/diag/*`) 제거
 - [ ] `SUBMIT.md` 갱신, 변경 커밋 + push

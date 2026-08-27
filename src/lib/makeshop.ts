@@ -1,4 +1,4 @@
-const CLIENT_ID = process.env.MAKESHOP_CLIENT_ID || '';
+export const CLIENT_ID = process.env.MAKESHOP_CLIENT_ID || '';
 const CLIENT_SECRET = process.env.MAKESHOP_CLIENT_SECRET || '';
 
 /**
@@ -117,4 +117,44 @@ export async function createReview(token: string, shopUid: string, review: Makes
   unwrap('/review/store', d);
   const datas = d.datas ?? {};
   if (datas.result === false) throw new Error(`review/store rejected: ${(datas.message ?? []).join(', ')}`);
+}
+
+// ---------------------------------------------------------------------------
+// 유료앱 결제/환불 콜백 API (docs/guide/app/orders-callback-api)
+// 파트너사가 자체 결제/환불을 처리한 뒤 이 API로 메이크샵에 전달해야 상점의
+// 앱 결제 내역·만료일이 갱신된다. 성공 시 HTTP 201. 액세스 토큰 필수.
+// ---------------------------------------------------------------------------
+
+export type PaymentMethod = 'CARD' | 'TRANSFER' | 'VIRTUAL_ACCOUNT' | 'PHONE' | 'FREE';
+
+export type CallbackPayload = {
+  client_id: string;
+  partner_order_uid: string;
+  amount: number;
+  payment_method: PaymentMethod;
+  /** YYYYMMDD. 결제/환불 관계없이 앱 설치 만료일로 강제 덮어쓰기된다. */
+  expired_at?: string;
+  refund_reason?: string;
+};
+
+/** 결제 완료 전달 — POST /api/application/{shop_uid}/callback/payment (성공 201). */
+export async function notifyPayment(token: string, shopUid: string, body: CallbackPayload): Promise<Response> {
+  const res = await proxyFetch(`${API_BASE}/api/application/${shopUid}/callback/payment`, {
+    method: 'POST',
+    headers: merged(token),
+    body: JSON.stringify(body),
+  });
+  if (res.status !== 201) throw new Error(`callback/payment ${res.status}: ${await res.text()}`);
+  return res;
+}
+
+/** 환불 완료 전달 — POST /api/application/{shop_uid}/callback/refund (성공 201). */
+export async function notifyRefund(token: string, shopUid: string, body: CallbackPayload): Promise<Response> {
+  const res = await proxyFetch(`${API_BASE}/api/application/${shopUid}/callback/refund`, {
+    method: 'POST',
+    headers: merged(token),
+    body: JSON.stringify(body),
+  });
+  if (res.status !== 201) throw new Error(`callback/refund ${res.status}: ${await res.text()}`);
+  return res;
 }

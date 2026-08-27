@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyLaunch, sessionCookie } from '@/lib/launch';
 import { getValidToken } from '@/lib/token';
+import { getSubscription } from '@/lib/billing';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -21,6 +22,9 @@ export async function GET(req: NextRequest) {
 
   // 토큰이 없거나 만료 임박이면 지금 재발급해 둔다 — 첫 화면(상품 목록)이 바로 열리게.
   await getValidToken(launch.shopUid);
+  // 무료체험 만료일(설치일 + 무료체험 기간)을 메이크샵 설치 정보에서 읽어 캐시한다.
+  // 실패해도 (getSubscription의 폴백) 설치는 막지 않는다.
+  await getSubscription(launch.shopUid).catch(() => {});
 
   const res = NextResponse.redirect(new URL('/admin', req.url));
   res.cookies.set(sessionCookie(launch.shopUid));
