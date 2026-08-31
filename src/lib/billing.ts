@@ -141,16 +141,18 @@ const memoryBillingStore: BillingStore = {
 function pgStores(url: string): { sub: SubStore; bill: BillingStore } {
   const sql = postgres(url, { max: 1 });
   let ready: Promise<void> | null = null;
+  // 주의: postgres.js는 하나의 prepared statement에 여러 SQL 문을 넣을 수 없다 (Neon 500/502).
+  // 문장별로 나눠 실행해야 한다 (2026-08-31 실측 — 콜백 502의 원인).
   const init = () =>
-    (ready ??= sql`
-      create table if not exists makeshop_subscription (
+    (ready ??= (async () => {
+      await sql`create table if not exists makeshop_subscription (
         shop_uid text primary key,
         installed_at timestamptz,
         expired_at timestamptz not null,
         status text not null default 'trial',
         updated_at timestamptz not null default now()
-      );
-      create table if not exists makeshop_billing (
+      )`;
+      await sql`create table if not exists makeshop_billing (
         id bigserial primary key,
         shop_uid text not null,
         kind text not null,
@@ -161,9 +163,9 @@ function pgStores(url: string): { sub: SubStore; bill: BillingStore } {
         expired_at timestamptz not null,
         callback_status int,
         created_at timestamptz not null default now()
-      );
-      create index if not exists makeshop_billing_shop_idx on makeshop_billing (shop_uid, id desc);
-    `.then(() => undefined));
+      )`;
+      await sql`create index if not exists makeshop_billing_shop_idx on makeshop_billing (shop_uid, id desc)`;
+    })());
 
   const row = (r: { installed_at: Date | null; expired_at: Date; status: string; updated_at: Date }): SubRow => ({
     shop_uid: '',
