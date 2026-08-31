@@ -107,7 +107,7 @@ function SubscriptionCard({
     <div className="mt-4 rounded-lg border border-neutral-300 bg-white p-4">
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium">
-          {status === 'paid' ? '유료 이용 중' : `무료체험 중 · D-${quota.daysLeft ?? 0}`}
+          {status === 'paid' ? '유료 이용 중' : `무료체험 중 · D-${Math.min(quota.daysLeft ?? 0, 999)}`}
         </p>
         <span className="text-[11px] text-neutral-500">만료일 {kstDate(quota.expiredAt ?? '')}</span>
       </div>

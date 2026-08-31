@@ -319,7 +319,15 @@ export async function processPayment(
   opts: PaymentInput,
 ): Promise<{ status: 'paid'; expiredAt: string; callbackStatus: number }> {
   const sub = await getSubscription(shopUid);
-  const baseMs = Math.max(Date.now(), Date.parse(sub.expiredAt) || Date.now());
+  // 연장 기준(만료일) — Makeshop이 무기한 센티널로 9999-12-31을 내려줄 수 있다(실측 2026-08-31,
+  // hello765). 이걸 그대로 +30일 하면 연도 10000이 되어 YYYYMMDD 검증(8자리)에 걸려 콜백 400이 난다.
+  // 현실적 만료일(2500년 이전)만 연장 기준으로 쓰고, 그 외(센티널·과거)는 오늘부터 계산한다.
+  const parsedExpiry = Date.parse(sub.expiredAt);
+  const usableExpiry =
+    Number.isFinite(parsedExpiry) && parsedExpiry > Date.now() && parsedExpiry < Date.UTC(2500, 0, 1)
+      ? parsedExpiry
+      : Date.now();
+  const baseMs = Math.max(Date.now(), usableExpiry);
   const termDays = opts.termDays ?? PLAN.termDays;
   const newExpiry = new Date(baseMs + termDays * 86_400_000);
   const amount = opts.amount ?? PLAN.price;
