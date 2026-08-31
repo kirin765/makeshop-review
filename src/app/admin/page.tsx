@@ -23,6 +23,9 @@ type Result = {
   skipped?: number;
   freeRemaining?: number | null;
   paid?: boolean;
+  /** 결제/환불 시 메이크샵 콜백 API의 HTTP 상태 — 데모에서는 201이어야 한다 (심사 확인용) */
+  callbackStatus?: number;
+  refunded?: boolean;
   quotaExceeded?: boolean;
   paywall?: boolean;
   expiredAt?: string;
@@ -31,12 +34,47 @@ type Result = {
   headers?: string[];
 };
 
+type BillingInfo = {
+  demoMode: boolean;
+  subscription: {
+    status: 'trial' | 'paid' | 'expired';
+    installedAt: string | null;
+    expiredAt: string;
+    daysLeft: number;
+    unverified: boolean;
+  };
+  plan: { name: string; price: number; termDays: number };
+  history: {
+    id: number;
+    kind: 'payment' | 'refund';
+    partnerOrderUid: string;
+    amount: number;
+    paymentMethod: string;
+    expiredAt: string;
+    callbackStatus: number | null;
+    createdAt: string;
+    refundReason: string | null;
+  }[];
+};
+
 function kstDate(iso: string): string {
   return new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(iso));
 }
 
 /** 구독 상태 카드 — 무료체험(기간) / 유료 / 만료(페이월+결제하기) */
-function SubscriptionCard({ quota, onPay }: { quota: Quota; onPay: () => void }) {
+function SubscriptionCard({
+  quota,
+  demoMode,
+  onPay,
+  onRefund,
+  refunding,
+}: {
+  quota: Quota;
+  demoMode: boolean;
+  onPay: () => void;
+  onRefund: () => void;
+  refunding: boolean;
+}) {
   const status = quota.status ?? (quota.paid ? 'paid' : 'trial');
   const price = quota.plan?.price ?? 9900;
   const termDays = quota.plan?.termDays ?? 30;
@@ -50,12 +88,17 @@ function SubscriptionCard({ quota, onPay }: { quota: Quota; onPay: () => void })
         <p className="mt-2 text-xs text-neutral-500">
           {quota.plan?.name ?? '리뷰이사 유료 플랜'} · 월 {price.toLocaleString()}원 · 이용 기간 {termDays}일
         </p>
-        <button
-          onClick={onPay}
-          className="mt-3 rounded bg-black px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800"
-        >
-          결제하고 계속 이용하기
-        </button>
+        {demoMode ? (
+          <button
+            onClick={onPay}
+            disabled={refunding}
+            className="mt-3 rounded bg-black px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:opacity-40"
+          >
+            결제하고 계속 이용하기
+          </button>
+        ) : (
+          <p className="mt-2 text-xs text-neutral-500">결제·환불 문의: kwan765@naver.com (결제 완료 시 자동으로 풀립니다)</p>
+        )}
       </div>
     );
   }
@@ -80,7 +123,18 @@ function SubscriptionCard({ quota, onPay }: { quota: Quota; onPay: () => void })
         </>
       )}
       {status === 'paid' && (
-        <p className="mt-2 text-[11px] text-neutral-500">횟수 제한 없이 이용할 수 있어요. 결제·환불 문의: kwan765@naver.com</p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <p className="text-[11px] text-neutral-500">횟수 제한 없이 이용할 수 있어요. 결제·환불 문의: kwan765@naver.com</p>
+          {demoMode && (
+            <button
+              onClick={onRefund}
+              disabled={refunding}
+              className="rounded border border-neutral-300 px-2 py-1 text-[11px] text-neutral-700 hover:bg-neutral-100 disabled:opacity-40"
+            >
+              {refunding ? '환불 처리 중…' : '환불 처리 (데모 — 콜백 연동 확인용)'}
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
@@ -92,20 +146,25 @@ export default function Admin() {
   const [loading, setLoading] = useState(true);
   const [shopUid, setShopUid] = useState('');
   const [quota, setQuota] = useState<Quota | null>(null);
+  const [billing, setBilling] = useState<BillingInfo | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [productNo, setProductNo] = useState<string>('');
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [paying, setPaying] = useState(false);
+  const [refunding, setRefunding] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
 
   useEffect(() => {
-    fetch('/api/products')
-      .then((r) => r.json())
-      .then((d) => {
+    Promise.all([
+      fetch('/api/products').then((r) => r.json()),
+      fetch('/api/billing').then((r) => r.json()),
+    ])
+      .then(([d, b]) => {
         if (d.shopUid) setShopUid(d.shopUid);
         if (d.quota) setQuota(d.quota);
         if (Array.isArray(d.products)) setProducts(d.products);
+        if (b.subscription) setBilling(b);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -116,6 +175,15 @@ export default function Admin() {
       .then((r) => r.json())
       .then((d) => {
         if (d.quota) setQuota(d.quota);
+      })
+      .catch(() => {});
+  }
+
+  function refreshBilling() {
+    fetch('/api/billing')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.subscription) setBilling(d);
       })
       .catch(() => {});
   }
@@ -131,8 +199,9 @@ export default function Admin() {
       });
       const json = await res.json();
       if (res.ok) {
-        setResult({ written: 0, paid: true, freeRemaining: null });
+        setResult({ written: 0, paid: true, freeRemaining: null, callbackStatus: json.callbackStatus });
         refreshQuota();
+        refreshBilling();
       } else {
         setResult({ error: json.error ?? '결제 처리에 실패했습니다.' });
       }
@@ -140,6 +209,31 @@ export default function Admin() {
       setResult({ error: '결제 처리에 실패했습니다.' });
     } finally {
       setPaying(false);
+    }
+  }
+
+  async function refund() {
+    if (!window.confirm('결제를 환불 처리하고 앱 이용을 종료합니다. 진행할까요? (메이크샵 refund 콜백을 호출합니다)')) return;
+    setRefunding(true);
+    setResult(null);
+    try {
+      const res = await fetch('/api/billing/refund', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payment_method: 'CARD', refund_reason: '데모 — 환불 콜백 연동 확인' }),
+      });
+      const json = await res.json();
+      if (res.ok) {
+        setResult({ refunded: true, callbackStatus: json.callbackStatus });
+        refreshQuota();
+        refreshBilling();
+      } else {
+        setResult({ error: json.error ?? '환불 처리에 실패했습니다.' });
+      }
+    } catch {
+      setResult({ error: '환불 처리에 실패했습니다.' });
+    } finally {
+      setRefunding(false);
     }
   }
 
@@ -181,7 +275,41 @@ export default function Admin() {
       <h1 className="text-lg font-semibold">리뷰 옮기기</h1>
       <p className="mt-1 text-xs text-neutral-500">shop_uid: {shopUid}</p>
 
-      {quota && <SubscriptionCard quota={quota} onPay={pay} />}
+      {quota && (
+        <SubscriptionCard
+          quota={quota}
+          demoMode={billing?.demoMode ?? false}
+          onPay={pay}
+          onRefund={refund}
+          refunding={refunding}
+        />
+      )}
+
+      {billing?.demoMode && billing.history.length > 0 && (
+        <div className="mt-4 rounded-lg border border-neutral-200 bg-white p-4">
+          <p className="text-[11px] font-semibold text-neutral-600">
+            결제/환불 콜백 이력 (심사 확인용 — callback HTTP 201 = 메이크샵 전송 성공)
+          </p>
+          <ul className="mt-2 space-y-1 text-[11px] text-neutral-600">
+            {billing.history.map((h) => (
+              <li key={h.id} className="flex items-center gap-2">
+                <span className={h.kind === 'payment' ? 'text-blue-700' : 'text-red-700'}>
+                  {h.kind === 'payment' ? '결제' : '환불'}
+                </span>
+                <span>{h.amount.toLocaleString()}원</span>
+                <span>만료 {kstDate(h.expiredAt)}</span>
+                <span
+                  className={`rounded px-1.5 py-0.5 font-mono ${
+                    h.callbackStatus === 201 ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'
+                  }`}
+                >
+                  callback {h.callbackStatus ?? '—'}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {quota?.status === 'expired' ? (
         <div className="mt-6 rounded border border-neutral-200 bg-neutral-50 p-6 text-center text-sm text-neutral-600">
@@ -280,16 +408,26 @@ export default function Admin() {
               <div>
                 <p className="font-medium text-red-700">무료체험 기간이 끝났습니다.</p>
                 <p className="mt-1 text-xs text-neutral-600">결제 후 계속 이용할 수 있습니다.</p>
-                <button
-                  onClick={pay}
-                  disabled={paying}
-                  className="mt-3 rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-40"
-                >
-                  {paying ? '결제 처리 중…' : '결제하고 계속 이용하기'}
-                </button>
+                {billing?.demoMode ? (
+                  <button
+                    onClick={pay}
+                    disabled={paying}
+                    className="mt-3 rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-40"
+                  >
+                    {paying ? '결제 처리 중…' : '결제하고 계속 이용하기'}
+                  </button>
+                ) : (
+                  <p className="mt-2 text-xs text-neutral-500">결제·환불 문의: kwan765@naver.com</p>
+                )}
               </div>
             ) : (
-              <SubscriptionCard quota={{ ...quota!, paywall: false }} onPay={pay} />
+              <SubscriptionCard
+                quota={{ ...quota!, paywall: false }}
+                demoMode={billing?.demoMode ?? false}
+                onPay={pay}
+                onRefund={refund}
+                refunding={refunding}
+              />
             )
           ) : result.error ? (
             <p className="text-red-600">
@@ -317,10 +455,21 @@ export default function Admin() {
           ) : (
             <>
               <p className="font-medium">
-                {result.paid
-                  ? '결제가 완료되었습니다. 리뷰 옮기기를 계속 사용할 수 있어요.'
-                  : `구매평 ${result.written}건을 옮겼습니다.`}
+                {result.refunded
+                  ? '환불 처리 완료 — 앱 이용이 종료되었습니다.'
+                  : result.paid
+                    ? '결제가 완료되었습니다. 리뷰 옮기기를 계속 사용할 수 있어요.'
+                    : `구매평 ${result.written}건을 옮겼습니다.`}
               </p>
+              {typeof result.callbackStatus === 'number' && (
+                <p className="mt-1 text-xs">
+                  {result.refunded ? '환불' : '결제'} 콜백 전송 완료 · HTTP{' '}
+                  <span className={`font-mono font-semibold ${result.callbackStatus === 201 ? 'text-emerald-700' : 'text-red-700'}`}>
+                    {result.callbackStatus}
+                  </span>{' '}
+                  {result.callbackStatus === 201 ? '(메이크샵 수신 성공 — 만료일 자동 갱신)' : '(수신 실패 — 관리자에게 문의)'}
+                </p>
+              )}
               {(result.skipped ?? 0) > 0 && (
                 <p className="mt-1 text-xs text-neutral-500">(건너뜀 {result.skipped}건)</p>
               )}

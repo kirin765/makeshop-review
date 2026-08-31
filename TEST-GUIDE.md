@@ -180,21 +180,25 @@ console.log(`https://<prod>/?shop_uid=${shopUid}&timestamp=${ts}&action_type=${a
    (또는 `curl -X POST /api/billing/payment -H 'Content-Type: application/json' -d '{"payment_method":"CARD"}'`)
 2. **통과 기준**:
    - 응답 `status: "paid"`, `expiredAt` = 오늘 + 30일
-   - 메이크샵 결제 콜백이 **HTTP 201** (로컬 `makeshop_billing.callback_status = 201`)
+   - 화면에 **"결제 콜백 전송 완료 · HTTP 201 (메이크샵 수신 성공)"** 표시
+   - `/admin`의 **결제/환불 콜백 이력** 카드에 `결제 … callback 201` 행 추가 (심사 캡처용)
+   - 로컬 `makeshop_billing.callback_status = 201`
    - `GET /api/application/{shop_uid}/apps`의 `expired_at`이 새 만료일로 덮어써짐
    - 후기 업로드가 다시 동작 (paid = 횟수 제한 없음)
 3. 파트너센터 어드민 > 판매관리 > 주문 내역에 결제 건 표시 (callback 연동 확인)
 
 ### 5.7 시나리오 G — 환불 → 콜백 201 → 즉시 차단
 
-1. `curl -X POST /api/billing/refund -H 'Content-Type: application/json' `
-   `-d '{"payment_method":"CARD","refund_reason":"더 이상 사용하지 않습니다."}'`
+1. 유료 상태(`paid`)에서 `/admin`의 **환불 처리 (데모 — 콜백 연동 확인용)** 클릭
+   (또는 `curl -X POST /api/billing/refund -H 'Content-Type: application/json' `
+   `-d '{"payment_method":"CARD","refund_reason":"더 이상 사용하지 않습니다."}'`)
 2. **통과 기준**:
    - 응답 `status: "expired"`
+   - 화면에 **"환불 콜백 전송 완료 · HTTP 201"** 표시, `/admin` 이력 카드에 `환불 … callback 201` 행 추가
    - refund 콜백 **HTTP 201**, `expired_at` = 오늘(즉시 만료)
    - 파트너센터 어드민 > 판매관리 > 환불 내역에 환불 건 표시
    - 후기 업로드 → 402 paywall (환불 후 재사용 불가)
-3. 환불 후 재결제하면 시나리오 F와 동일하게 복구된다
+3. 환불 후 재결제하면 시나리오 F와 동일하게 복구된다 (F→G→F 데모 루프로 두 콜백을 모두 입증)
 
 ---
 
