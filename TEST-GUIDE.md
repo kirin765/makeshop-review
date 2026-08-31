@@ -141,7 +141,8 @@ console.log(`https://<prod>/?shop_uid=${shopUid}&timestamp=${ts}&action_type=${a
 1. 파트너센터 → 상품 > App > 개발정보 관리 → **테스트 실행**
 2. APP URL(`/` → `/api/auth/launch`) 호출 → hmac 통과 → `/admin` 307
 3. `/admin`이 "리뷰 옮기기" UI + shop_uid + 상품 목록 표시
-4. `curl /api/diag/token?shop_uid=...` → `hasToken:true`
+4. `curl /api/billing`(세션 쿠키 포함) → `subscription.status` 정상 응답
+   (진단 라우트 `/api/diag/*`는 심사 전에 제거했음 — 테스트는 `/api/billing`·DB로 확인)
 
 **통과 기준**: 상품 목록이 채워진다 (토큰 발급 + 상품 API 통과).
 
@@ -161,7 +162,7 @@ console.log(`https://<prod>/?shop_uid=${shopUid}&timestamp=${ts}&action_type=${a
 ### 5.4 시나리오 D — 무료 20건 소진
 
 1. 20건 초과 업로드 → 402 + `quotaExceeded`
-2. 사용량 확인: `curl /api/diag/token` 확장 전, DB `usage_counter` 조회
+2. DB `makeshop_usage.written`으로 사용량 확인
 
 ### 5.5 시나리오 E — 무료체험 기간(만료) enforcement
 
@@ -223,7 +224,7 @@ console.log(`https://<prod>/?shop_uid=${shopUid}&timestamp=${ts}&action_type=${a
 - [ ] 시나리오 A (설치 완주) 통과 — 상품 목록 표시
 - [ ] 시나리오 C (후기 등록) 통과 — 관리자 화면에서 확인
 - [ ] 시나리오 E (무료체험 만료 → 402 paywall) 통과
-- [ ] 시나리오 F (결제 → 콜백 201 → 만료일 갱신) 통과 — **심사 승인 조건**
-- [ ] 시나리오 G (환불 → 콜백 201 → 즉시 차단) 통과
-- [ ] 진단 라우트(`/api/diag/*`) 제거
+- [ ] 시나리오 F (결제 → 콜백 201 → 만료일 갱신) 통과 — **심사 승인 조건** ✅ 2026-08-31 실측 통과 (`scripts/run-callback-demo.mjs`)
+- [ ] 시나리오 G (환불 → 콜백 201 → 즉시 차단) 통과 ✅ 2026-08-31 실측 통과
+- [ ] 진단 라우트(`/api/diag/*`) 제거 ✅ 2026-08-31 제거
 - [ ] `SUBMIT.md` 갱신, 변경 커밋 + push
