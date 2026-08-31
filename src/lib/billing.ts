@@ -381,7 +381,14 @@ export async function processRefund(
   const sub = await getSubscription(shopUid);
   const now = new Date();
   const amount = opts.amount ?? PLAN.price;
-  const orderUid = opts.partnerOrderUid ?? genOrderUid(shopUid);
+  // 환불은 **원 결제건의 partner_order_uid**를 참조해야 한다 (실측 2026-08-31:
+  // 새 번호를 보내면 callback/refund 404 "원 결제건을 찾을 수 없습니다").
+  // 운영(PG 웹훅)에서는 웹훅이 준 원 결제 번호(opts.partnerOrderUid)를 그대로 쓰고,
+  // 없으면(데모) 가장 최근 결제 건의 번호를 재사용한다.
+  const orderUid =
+    opts.partnerOrderUid ??
+    (await stores.bill.list(shopUid, 20)).find((r) => r.kind === 'payment')?.partner_order_uid ??
+    genOrderUid(shopUid);
 
   const token = await getValidToken(shopUid);
   if (!token) throw new BillingError('token unavailable (IP allowlist?)');
