@@ -102,6 +102,10 @@ export type MakeshopReview = {
   content: string;
   reg_date?: string; // 0000-00-00 00:00:00
   score_1?: string; // 1~5
+  score_2?: string; // 1~5 (코멘트 평점타입은 5개 항목 전부 저장한다 — 실측: score_1만 넣으면 나머지가 0으로 저장)
+  score_3?: string;
+  score_4?: string;
+  score_5?: string;
   display?: string; // Y
 };
 
@@ -117,6 +121,38 @@ export async function createReview(token: string, shopUid: string, review: Makes
   unwrap('/review/store', d);
   const datas = d.datas ?? {};
   if (datas.result === false) throw new Error(`review/store rejected: ${(datas.message ?? []).join(', ')}`);
+}
+
+/**
+ * 코멘트 평점타입 후기 삭제 — POST /api/v1/:shopId/review/delete (개발자센터 게시판 > 후기).
+ *
+ * ⚠️ 실측 필요: 개발자센터 문서는 요청 본문 스키마를 명시하지 않는다. 등록 문서에
+ * "리뷰 수정 시 작성일, 상품번호를 통해 리뷰가 매칭"된다고 명시돼 있어(등록=수정 동일
+ * 엔드포인트), 삭제도 같은 키(uid=상품번호·hname=작성자·reg_date=작성일)로 매칭되리라
+ * 보고 등록 때 보낸 값 그대로를 보낸다. 응답 형식(200 + return_code)은 등록과 같다고 본다.
+ */
+export type ReviewDeleteTarget = {
+  uid: string; // 상품번호
+  hname: string; // 작성자
+  reg_date?: string; // 작성일
+  content?: string;
+};
+
+export async function deleteReview(token: string, shopUid: string, target: ReviewDeleteTarget): Promise<void> {
+  const res = await proxyFetch(`${API_BASE}/api/v1/${shopUid}/review/delete`, {
+    method: 'POST',
+    headers: merged(token),
+    body: JSON.stringify({ save_type: 'delete', ...target }),
+  });
+  if (!res.ok) {
+    const err = new Error(`review/delete ${res.status}: ${await res.text()}`) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
+  const d = await res.json();
+  unwrap('/review/delete', d);
+  const datas = d.datas ?? {};
+  if (datas.result === false) throw new Error(`review/delete rejected: ${(datas.message ?? []).join(', ')}`);
 }
 
 // ---------------------------------------------------------------------------
