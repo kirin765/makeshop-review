@@ -116,7 +116,13 @@ export async function createReview(token: string, shopUid: string, review: Makes
     headers: merged(token),
     body: JSON.stringify(review),
   });
-  if (!res.ok) throw new Error(`review/store ${res.status}: ${await res.text()}`);
+  if (!res.ok) {
+    // status를 붙여 던진다 — writeReviews가 400·422(재시도 무의미)를 영구 실패로 분류해
+    // 클라이언트의 자동 이어하기가 같은 배치를 무한 재시도하지 않게 한다.
+    const err = new Error(`review/store ${res.status}: ${await res.text()}`) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
   const d = await res.json();
   unwrap('/review/store', d);
   const datas = d.datas ?? {};

@@ -85,7 +85,7 @@ export async function POST(req: NextRequest) {
   const token = await getValidToken(shopUid);
   if (!token) return NextResponse.json({ error: 'token unavailable (IP allowlist?)' }, { status: 502 });
 
-  const { written, failed, failMessage } = await writeReviews(token.access_token, shopUid, productNo, toWrite);
+  const { written, failed, permanentFailed, failMessage } = await writeReviews(token.access_token, shopUid, productNo, toWrite);
   if (!quota.paid && written) await addUsage(shopUid, written);
 
   // 무료 한도로 보낸 슬라이스 일부가 아예 시도되지 않은 경우에만 "한도 소진"이다.
@@ -96,6 +96,9 @@ export async function POST(req: NextRequest) {
     parsed: parsed.length,
     written,
     failed,
+    // 재시도로 풀리지 않는 오류(400·422·"rejected")로 끝난 건수 — 클라이언트는 실패가
+    // 전부 영구적일 때만 그 배치의 자동 재시도를 멈춘다.
+    permanentFailed,
     already,
     quotaExhausted,
     paid: quota.paid,

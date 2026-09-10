@@ -7,6 +7,7 @@ import {
   removeImports,
   listImportKeys,
   getImports,
+  type ImportedReviewRow,
 } from '@/lib/imports';
 
 export const runtime = 'nodejs';
@@ -18,6 +19,12 @@ export const maxDuration = 60;
 // 이 값을 넘는 건은 클라이언트가 나눠 보내거나(all=false) 서버가 hasMore로 계속한다(all=true).
 const MAX_DELETE = 30;
 const DELAY_MS = 150; // 연속 호출 부하 방지 (등록과 같은 리듬)
+// 함수 시간 예산 — 예산이 다 살면 반드시 응답한다. 60초 제한을 넘겨 함수가 죽으면
+// 클라이언트가 응답을 못 받고 원장 정리(removeImports)도 실행되지 않아 "지웠는데
+// 목록엔 남아" 보인다 (cafe24-review 613816f). 못 지운 건은 실패로 돌려 다음 턴에 이어간다.
+const BUDGET_MS = 45000;
+// 예산이 이만큼 덜 남으면 새 삭제를 시작하지 않는다(호출 1회 + 재시도 여유).
+const DELETE_MIN_MS = 5000;
 
 /**
  * 리뷰이사가 옮긴 리뷰 관리. 목록·삭제 모두 원장(makeshop_review_imported)만 기준으로 동작한다.
@@ -87,25 +94,52 @@ export async function DELETE(req: NextRequest) {
 
   const deleted: string[] = [];
   const failed: { import_key: string; error: string }[] = [];
+  const deadline = Date.now() + BUDGET_MS;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /** 한 건을 지운다. 성공·이미 없음이면 ok. 타임아웃·연결 오류는 재시도한다. */
+  const deleteOne = async (key: string, row: ImportedReviewRow): Promise<{ ok: boolean; error: string }> => {
+    let lastErr = '';
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (Date.now() > deadline) return { ok: false, error: '함수 시간 예산 초과 — 다시 시도해 주세요.' };
+      try {
+        await deleteReview(token.access_token, shopUid, {
+          uid: row.product_uid,
+          hname: row.writer,
+          reg_date: row.created_date ?? undefined,
+          content: row.content,
+        });
+        return { ok: true, error: '' };
+      } catch (e) {
+        lastErr = (e as Error).message.slice(0, 200);
+        const status = (e as { status?: number }).status;
+        // 이미 지워졌거나(404) 데이터가 거부된("rejected") 건은 다시 시도해도 같다.
+        if (status === 404 || /rejected/i.test(lastErr)) return { ok: false, error: lastErr };
+        if (attempt === 3) break;
+        const wait = 500 * (attempt + 1);
+        if (Date.now() + wait > deadline - 3000) return { ok: false, error: lastErr };
+        await sleep(wait);
+      }
+    }
+    return { ok: false, error: lastErr };
+  };
+
   for (const key of keys) {
+    if (deadline - Date.now() <= DELETE_MIN_MS) {
+      // 예산 소진 — 남은 건은 실패로 돌려 클라이언트가 이어서 지운다.
+      failed.push({ import_key: key, error: '함수 시간 예산 초과 — 다시 시도해 주세요.' });
+      continue;
+    }
     const row = rowByKey.get(key);
     if (!row) {
       // 이미 원장에서 지워진 행 — 목표가 이뤄진 것이므로 성공 처리한다(멱등).
       deleted.push(key);
       continue;
     }
-    try {
-      await deleteReview(token.access_token, shopUid, {
-        uid: row.product_uid,
-        hname: row.writer,
-        reg_date: row.created_date ?? undefined,
-        content: row.content,
-      });
-      deleted.push(key);
-    } catch (e) {
-      failed.push({ import_key: key, error: (e as Error).message.slice(0, 200) });
-    }
-    await new Promise((r) => setTimeout(r, DELAY_MS));
+    const r = await deleteOne(key, row);
+    if (r.ok) deleted.push(key);
+    else failed.push({ import_key: key, error: r.error });
+    await sleep(DELAY_MS);
   }
   try {
     await removeImports(shopUid, deleted);

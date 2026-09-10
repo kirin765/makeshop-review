@@ -58,28 +58,49 @@ export function reviewHash(
 
 const TABLE = 'makeshop_review_imported';
 
-async function withDb<T>(fn: (sql: postgres.Sql) => Promise<T>): Promise<T | null> {
+// 서버리스 인스턴스마다 풀을 하나만 맺고 재사용한다. 요청마다 연결을 맺고 끊고 DDL을
+// 다시 돌리면 요청당 수백 ms씩 낭비돼 대량 이관이 그만큼 느려진다 (cafe24-review b75caf8).
+let shared: postgres.Sql | null = null;
+let schemaReady = false;
+
+function db(): postgres.Sql | null {
   const url = process.env.DATABASE_URL;
   if (!url) return null;
-  const sql = postgres(url, { max: 1 });
+  if (!shared) shared = postgres(url, { max: 1, idle_timeout: 20, max_lifetime: 1800 });
+  return shared;
+}
+
+async function withDb<T>(fn: (sql: postgres.Sql) => Promise<T>): Promise<T | null> {
+  const sql = db();
+  if (!sql) return null;
   try {
-    await sql`
-      create table if not exists ${sql(TABLE)} (
-        import_key text primary key,
-        shop_uid text not null,
-        product_uid text not null,
-        writer text not null,
-        score int not null,
-        content text not null,
-        created_date text,
-        dedup_hash text,
-        imported_at timestamptz not null default now()
-      )`;
-    await sql`create index if not exists makeshop_review_imported_mall_hash_idx
-      on ${sql(TABLE)} (shop_uid, dedup_hash) where dedup_hash is not null`;
+    if (!schemaReady) {
+      await sql`
+        create table if not exists ${sql(TABLE)} (
+          import_key text primary key,
+          shop_uid text not null,
+          product_uid text not null,
+          writer text not null,
+          score int not null,
+          content text not null,
+          created_date text,
+          dedup_hash text,
+          imported_at timestamptz not null default now()
+        )`;
+      await sql`create index if not exists makeshop_review_imported_mall_hash_idx
+        on ${sql(TABLE)} (shop_uid, dedup_hash) where dedup_hash is not null`;
+      schemaReady = true;
+    }
     return await fn(sql);
-  } finally {
-    await sql.end();
+  } catch (e) {
+    // 연결 계열 오류일 때만 풀을 버려 다음 호출이 새로 맺게 한다. 순수 SQL 오류까지
+    // 버리면 다음 호출마다 연결·DDL을 다시 하게 된다. 스키마는 DB에 있으니 한 번
+    // 확인됐으면 풀이 바뀌어도 다시 확인할 필요가 없다.
+    const msg = ((e as Error).message ?? '').toLowerCase();
+    if (shared === sql && /connect|socket|etimedout|econn|terminat|closed|reset|timeout/.test(msg)) {
+      shared = null;
+    }
+    throw e;
   }
 }
 

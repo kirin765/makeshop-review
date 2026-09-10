@@ -71,7 +71,15 @@ export async function POST(req: NextRequest) {
   let written = 0;
   let skipped = 0;
   const failMessage: string[] = [];
+  // 함수 시간 예산 — 60초 제한에 죽어 응답을 못 하는 것보다 남은 건을 실패로 돌려준다
+  // (cafe24-review b75caf8). 대량 이관은 /api/reviews/batch가 담당하고, 이 경로는 소량용이다.
+  const deadline = Date.now() + 45000;
   for (const r of toWrite) {
+    if (Date.now() > deadline) {
+      skipped += 1;
+      failMessage.push('함수 시간 예산 초과 — 다시 시도해 주세요.');
+      continue;
+    }
     try {
       await createReview(token.access_token, shopUid, toPayload(productNo, r));
       written += 1;

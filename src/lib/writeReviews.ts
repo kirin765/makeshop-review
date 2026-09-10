@@ -5,6 +5,10 @@ import { recordImports, reviewHash, type NewImport } from '@/lib/imports';
 // 메이크샵 review/store는 1건/호출이다. 연속 호출 부하를 막기 위해 건마다 잠깐 쉰다
 // (기존 /api/reviews와 같은 리듬). 서버리스 60초 안에서 배치 50건 ≈ 15초 수준.
 const DELAY_MS = 150;
+// 함수 시간 예산. Vercel 함수 제한(60초)을 넘겨 죽으면 클라이언트가 응답을 못 받고
+// 원장 기록도 건너뛴다. 예산이 다하면 남은 건을 실패로 돌려 반드시 응답한다 —
+// 클라이언트가 내용 해시 멱등으로 이어서 재시도하므로 안전하다 (cafe24-review b75caf8).
+const BUDGET_MS = 45000;
 // 원장 기록을 1건마다 DB에 쓰면 왕복이 많다. 성공분을 10건씩 모아 기록하되,
 // 요청이 중간에 죽어도 최근 10건 안에서는 원장이 남는다(카페24판 2464d56의
 // "배치 단위 즉시 기록"과 같은 취지 — 마지막에 몰아 기록하면 죽을 때 전부 사라진다).
@@ -46,6 +50,12 @@ export function toNewImport(productNo: string, r: ImportedReview): NewImport {
 export type WriteOutcome = {
   written: number;
   failed: number;
+  /**
+   * 재시도로 풀리지 않는 오류(400·422·"rejected" 데이터 거부)로 끝난 건수.
+   * 클라이언트는 실패가 전부 영구적일 때만 그 배치의 자동 재시도를 멈춘다 —
+   * 일부면 다시 보내 나머지(일시 오류)를 건진다.
+   */
+  permanentFailed: number;
   failMessage: string[];
 };
 
@@ -66,8 +76,10 @@ export async function writeReviews(
 ): Promise<WriteOutcome> {
   let written = 0;
   let failed = 0;
+  let permanentFailed = 0;
   const failMessage: string[] = [];
   let ledger: NewImport[] = [];
+  const deadline = Date.now() + BUDGET_MS;
 
   const flush = async () => {
     if (!ledger.length) return;
@@ -79,6 +91,13 @@ export async function writeReviews(
   };
 
   for (const r of reviews) {
+    // 예산이 다 찼으면 남은 건은 시작도 하지 않고 실패로 돌려준다 — 함수가 죽어
+    // 응답을 못 하는 것보다, 실패로 정직하게 돌려 클라이언트가 이어서 재시도하게 한다.
+    if (Date.now() > deadline) {
+      failed += 1;
+      failMessage.push('함수 시간 예산 초과 — 다시 시도해 주세요.');
+      continue;
+    }
     try {
       await createReview(token, shopUid, toPayload(productNo, r));
       written += 1;
@@ -86,11 +105,15 @@ export async function writeReviews(
       if (ledger.length >= LEDGER_FLUSH) await flush();
     } catch (e) {
       failed += 1;
-      failMessage.push((e as Error).message.slice(0, 120));
+      const msg = (e as Error).message;
+      const status = (e as { status?: number }).status;
+      // 데이터 거부("rejected")·400·422는 다시 보내도 실패한다 — 영구 실패로 표시한다.
+      if (status === 400 || status === 422 || /rejected/i.test(msg)) permanentFailed += 1;
+      failMessage.push(msg.slice(0, 120));
     }
     await sleep(DELAY_MS);
   }
   await flush();
 
-  return { written, failed, failMessage };
+  return { written, failed, permanentFailed, failMessage };
 }
