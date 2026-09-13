@@ -100,7 +100,11 @@ export type MakeshopReview = {
   uid: string; // 상품번호
   hname: string; // 작성자
   content: string;
-  reg_date?: string; // 0000-00-00 00:00:00
+  file_url?: string;
+  file_url_2?: string;
+  file_url_3?: string;
+  file_url_4?: string;
+  date?: string; // YYYY-MM-DD HH:mm:ss (review/store request field)
   score_1?: string; // 1~5
   score_2?: string; // 1~5 (코멘트 평점타입은 5개 항목 전부 저장한다 — 실측: score_1만 넣으면 나머지가 0으로 저장)
   score_3?: string;
@@ -110,11 +114,12 @@ export type MakeshopReview = {
 };
 
 /** 코멘트 평점타입 후기 등록 — 1건/호출. 필수: save_type, hname, content. */
-export async function createReview(token: string, shopUid: string, review: MakeshopReview): Promise<void> {
+export async function createReview(token: string, shopUid: string, review: MakeshopReview, opts: { signal?: AbortSignal } = {}): Promise<void> {
   const res = await proxyFetch(`${API_BASE}/api/v1/${shopUid}/review/store`, {
     method: 'POST',
     headers: merged(token),
     body: JSON.stringify(review),
+    signal: opts.signal,
   });
   if (!res.ok) {
     // status를 붙여 던진다 — writeReviews가 400·422(재시도 무의미)를 영구 실패로 분류해
@@ -124,9 +129,9 @@ export async function createReview(token: string, shopUid: string, review: Makes
     throw err;
   }
   const d = await res.json();
-  unwrap('/review/store', d);
-  const datas = d.datas ?? {};
-  if (datas.result === false) throw new Error(`review/store rejected: ${(datas.message ?? []).join(', ')}`);
+  const datas = d?.datas ?? {};
+  if (datas.result === false) throw Object.assign(new Error('review/store rejected'), { status: 422 });
+  if (d?.return_code !== '0000' || ![true, 1, '1'].includes(datas.result)) throw new Error('review/store response was not a confirmed success');
 }
 
 /**

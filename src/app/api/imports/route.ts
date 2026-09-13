@@ -143,11 +143,12 @@ export async function DELETE(req: NextRequest) {
   }
   try {
     await removeImports(shopUid, deleted);
-  } catch (e) {
-    console.error('[imports] ledger cleanup failed', (e as Error).message);
+  } catch {
+    return NextResponse.json({ error: '삭제 후 기록 저장에 실패했습니다. 목록을 확인해 주세요.', deleted, failed }, { status: 503 });
   }
   // 전체 삭제에서 아무것도 못 지웠으면 계속 순회하면 같은 글을 다시 시도해 무한 루프가 된다.
   // 이번 턴에서 한 건도 삭제되지 않았다면 중단한다.
+  if (body.all && deleted.length > 0) hasMore = ((await listImportKeys(shopUid, String(body.product_no || '') || undefined, 1))?.length ?? 0) > 0;
   const more = hasMore && deleted.length > 0;
   return NextResponse.json({ deleted, failed, hasMore: more });
 }

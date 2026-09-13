@@ -1,21 +1,9 @@
 import { createHash, randomUUID } from 'crypto';
 import postgres from 'postgres';
 
-/**
- * 리뷰이사가 옮긴 리뷰 원장 (메이크샵판).
- * 옮기기 성공 시 **1건씩** 즉시 기록한다 — 메이크샵 review/store는 1건/호출이고 응답으로
- * 성공·실패를 행 단위로 알려주므로(cafe24판 2464d56처럼) 원장이 곧 "무엇을 옮겼는가"의
- * 기준이 된다. 이 기록이 있어야 관리 화면에서 걸러 보고, review/delete로 지울 수 있다.
- *
- * dedup_hash: 같은 리뷰를 다시 보냈을 때(브라우저 재시작·요청 중단 후 재시도 등) 중복
- * 등록을 막기 위한 내용 해시. 메이크샵은 행별 성공을 응답으로 주므로 카페24판과 같은
- * 멱등이 가능하다 — 기록된(플러시된) 해시는 재전송에서 무조건 건너뛴다. 플러시가 10건
- * 단위라 마지막 창(≤10건)에서 죽은 성공분은 미기록이고 재전송 시 중복이 될 수 있다.
- *
- * ⚠️ 테이블 명을 고유하게(`makeshop_review_imported`) 쓴다. 이 DATABASE_URL은 다른
- *    프로젝트와 공유되는 DB라 제네릭한 이름은 다른 앱의 테이블과 충돌할 수 있다
- *    (godomall-review의 `godo_review_imported`와 같은 이유, 2026-09-01 실측).
- */
+// Durable, platform-scoped transfer ledger. A remote write requires a persisted claim.
+// Confirmed writes deduplicate by full-file occurrence; unknown outcomes stay blocked.
+
 
 export type ImportedReviewRow = {
   import_key: string;
@@ -33,6 +21,8 @@ export type NewImport = {
   score: number;
   content: string;
   created_date: string | null;
+  images?: string[];
+  sourceId?: string;
   dedup_hash?: string | null;
 };
 
@@ -44,7 +34,7 @@ export type NewImport = {
  */
 export function reviewHash(
   productUid: string,
-  r: { writer: string; score: number; content: string; created_date?: string | null },
+  r: { images?: string[]; sourceId?: string; writer: string; score: number; content: string; created_date?: string | null },
 ): string {
   const parts = [
     String(productUid),
@@ -53,6 +43,8 @@ export function reviewHash(
     String(r.content ?? ''),
     String(r.created_date ?? ''),
   ];
+  if (r.images?.length) parts.push('images:' + [...r.images].sort().join('\u0001'));
+  if (r.sourceId && r.sourceId !== 'occurrence:0') parts.push(r.sourceId);
   return createHash('sha256').update(parts.join('\u0000')).digest('hex');
 }
 
@@ -62,11 +54,13 @@ const TABLE = 'makeshop_review_imported';
 // 다시 돌리면 요청당 수백 ms씩 낭비돼 대량 이관이 그만큼 느려진다 (cafe24-review b75caf8).
 let shared: postgres.Sql | null = null;
 let schemaReady = false;
+let schemaPromise: Promise<unknown> | null = null;
+const CLAIMS = 'makeshop_review_write_attempt';
 
 function db(): postgres.Sql | null {
   const url = process.env.DATABASE_URL;
   if (!url) return null;
-  if (!shared) shared = postgres(url, { max: 1, idle_timeout: 20, max_lifetime: 1800 });
+  if (!shared) shared = postgres(url, { max: 1, idle_timeout: 20, max_lifetime: 1800, connect_timeout: 5, connection: { statement_timeout: 5000 } });
   return shared;
 }
 
@@ -75,21 +69,29 @@ async function withDb<T>(fn: (sql: postgres.Sql) => Promise<T>): Promise<T | nul
   if (!sql) return null;
   try {
     if (!schemaReady) {
-      await sql`
-        create table if not exists ${sql(TABLE)} (
-          import_key text primary key,
-          shop_uid text not null,
-          product_uid text not null,
-          writer text not null,
-          score int not null,
-          content text not null,
-          created_date text,
-          dedup_hash text,
-          imported_at timestamptz not null default now()
-        )`;
-      await sql`create index if not exists makeshop_review_imported_mall_hash_idx
-        on ${sql(TABLE)} (shop_uid, dedup_hash) where dedup_hash is not null`;
-      schemaReady = true;
+      schemaPromise ??= sql.begin(async (sql) => {
+        await sql`select pg_advisory_xact_lock(hashtext(${TABLE}))`;
+        await sql`
+          create table if not exists ${sql(TABLE)} (
+            import_key text primary key,
+            shop_uid text not null,
+            product_uid text not null,
+            writer text not null,
+            score int not null,
+            content text not null,
+            created_date text,
+            dedup_hash text,
+            imported_at timestamptz not null default now()
+          )`;
+        await sql`alter table ${sql(TABLE)} add column if not exists image_urls jsonb not null default '[]'::jsonb`;
+        await sql`create index if not exists makeshop_review_imported_mall_hash_idx
+          on ${sql(TABLE)} (shop_uid, dedup_hash) where dedup_hash is not null`;
+        await sql`create table if not exists ${sql(CLAIMS)} (
+          shop_id text not null, dedup_hash text not null, attempted_at timestamptz not null default now(),
+          primary key (shop_id, dedup_hash))`;
+      });
+      try { await schemaPromise; schemaReady = true; }
+      catch (error) { schemaPromise = null; throw error; }
     }
     return await fn(sql);
   } catch (e) {
@@ -104,10 +106,9 @@ async function withDb<T>(fn: (sql: postgres.Sql) => Promise<T>): Promise<T | nul
   }
 }
 
-/** 옮기기에 성공한 리뷰를 원장에 남긴다. 실패해도 옮기기 자체는 성공했으므로 조용히 넘어간다. */
 export async function recordImports(shopUid: string, rows: NewImport[]): Promise<void> {
   if (!rows.length) return;
-  try {
+  {
     // 한 줄이라도 undefined/NaN이 있으면 postgres가 통째로 거부한다(UNDEFINED_VALUE).
     // 값은 전부 안전한 원시형으로 다듬고, 상품번호가 빈 줄은 버린다.
     const safe = rows
@@ -122,45 +123,85 @@ export async function recordImports(shopUid: string, rows: NewImport[]): Promise
             String(r.content ?? '').slice(0, 10000),
             r.created_date == null ? null : String(r.created_date).slice(0, 40),
             r.dedup_hash == null ? null : String(r.dedup_hash).slice(0, 64),
-          ] as [string, string, string, string, number, string, string | null, string | null],
+            JSON.stringify(r.images ?? []),
+          ] as [string, string, string, string, number, string, string | null, string | null, string],
       )
       .filter((r) => r[2].length > 0);
-    if (!safe.length) return;
-    await withDb(async (sql) => {
+    if (safe.length !== rows.length) throw new Error('Invalid ledger row');
+    const saved = await withDb(async (sql) => {
       // ⚠️ postgres 3.4.9의 sql(객체배열, ...컬럼) 헬퍼는 값이 전부 정의돼 있어도
       // UNDEFINED_VALUE를 뱉는다(2026-09 실측·godomall 재현). 배열-of-배열로 직접 넣는다.
       await sql`
-        insert into ${sql(TABLE)} (import_key, shop_uid, product_uid, writer, score, content, created_date, dedup_hash)
+        insert into ${sql(TABLE)} (import_key, shop_uid, product_uid, writer, score, content, created_date, dedup_hash, image_urls)
         values ${sql(safe as unknown as readonly (string | number)[][])}
         on conflict (import_key) do nothing`;
+      return true;
     });
-  } catch (e) {
-    console.error('[imports] record failed', (e as Error).message);
+    if (!saved) throw new Error('Review storage is unavailable');
   }
 }
 
-/**
- * 이미 옮긴 리뷰(내용 해시 기준)를 가려낸다. 반환: 아직 안 옮긴 pending과
- * 이미 옮긴 건수. DB가 없으면 null → 호출자는 중복 제거 없이 그대로 진행한다.
- */
+/** Occurrence-aware legacy matching; unresolved old imports remain blocked. */
 export async function splitByExisting(
-  shopUid: string,
-  productUid: string,
-  hashes: string[],
-): Promise<{ pendingHashes: Set<string>; already: number } | null> {
-  const unique = [...new Set(hashes.filter(Boolean))];
-  if (!unique.length) return { pendingHashes: new Set(), already: 0 };
-  const url = process.env.DATABASE_URL;
-  if (!url) return null;
-  return withDb(async (sql) => {
-    const rows = await sql<{ dedup_hash: string }[]>`
-      select dedup_hash from ${sql(TABLE)}
-      where shop_uid = ${shopUid} and product_uid = ${productUid}
-        and dedup_hash in ${sql(unique)} and dedup_hash is not null`;
-    const found = new Set(rows.map((r) => r.dedup_hash));
-    const pendingHashes = new Set(unique.filter((h) => !found.has(h)));
-    return { pendingHashes, already: hashes.filter((h) => h && !pendingHashes.has(h)).length };
+  shopId: string, productId: string, hashes: string[],
+  identities: { legacyHash: string; occurrence: number }[] = hashes.map(legacyHash => ({ legacyHash, occurrence: 0 })),
+): Promise<{ pendingIndices: number[]; already: number; blocked: number }> {
+  const keys = [...new Set([...hashes, ...identities.map(i => i.legacyHash)])];
+  if (!keys.length) return { pendingIndices: [], already: 0, blocked: 0 };
+  const result = await withDb(async (sql) => {
+    const rows = await sql<{ dedup_hash: string; confirmed: boolean }[]>`
+      select dedup_hash, true as confirmed from ${sql(TABLE)}
+      where shop_uid = ${shopId} and product_uid = ${productId} and dedup_hash in ${sql(keys)}`;
+    const claims = await sql<{ dedup_hash: string }[]>`
+      select dedup_hash from ${sql(CLAIMS)} where shop_id = ${String(shopId)} and dedup_hash in ${sql(hashes)}`;
+    const blockedHashes = new Set(claims.map(r => r.dedup_hash));
+    const counts = new Map<string, number>();
+    const unresolved = new Set<string>();
+    for (const row of rows) {
+      if (row.confirmed) counts.set(row.dedup_hash, (counts.get(row.dedup_hash) ?? 0) + 1);
+      else unresolved.add(row.dedup_hash);
+    }
+    let already = 0; let blocked = 0; const pendingIndices: number[] = [];
+    hashes.forEach((hash, index) => {
+      const { legacyHash, occurrence } = identities[index];
+      if ((hash !== legacyHash && counts.has(hash)) || (counts.get(legacyHash) ?? 0) > occurrence) already++;
+      else if (blockedHashes.has(hash) || unresolved.has(hash) || unresolved.has(legacyHash)) blocked++;
+      else pendingIndices.push(index);
+    });
+    return { pendingIndices, already, blocked };
   });
+  if (!result) throw new Error('Review storage is unavailable');
+  return result;
+}
+
+/** Claim before POST; claims survive crashes and never expire automatically. */
+export async function claimImports(shopId: string, hashes: string[]): Promise<boolean> {
+  if (!hashes.length) return true;
+  const collision = new Error('write already claimed');
+  try {
+    const result = await withDb(sql => sql.begin(async tx => {
+      const values = hashes.map(hash => [String(shopId), hash]);
+      const claimed = await tx`insert into ${tx(CLAIMS)} (shop_id, dedup_hash)
+        values ${tx(values)} on conflict do nothing returning dedup_hash`;
+      if (claimed.length !== hashes.length) throw collision;
+      return true;
+    }));
+    if (!result) throw new Error('Review storage is unavailable');
+    return true;
+  } catch (error) {
+    if (error === collision) return false;
+    throw error;
+  }
+}
+
+/** Only a definite non-creation or verified deletion may release a claim. */
+export async function releaseClaims(shopId: string, hashes: string[]): Promise<void> {
+  if (!hashes.length) return;
+  const result = await withDb(async sql => {
+    await sql`delete from ${sql(CLAIMS)} where shop_id = ${String(shopId)} and dedup_hash in ${sql(hashes)}`;
+    return true;
+  });
+  if (!result) throw new Error('Review storage is unavailable');
 }
 
 /** 이 상점이 옮긴 리뷰 목록. 상품 필터가 있으면 그 상품만. 최신순, 페이지네이션. */
@@ -179,7 +220,7 @@ export async function listImports(
       sql<ImportedReviewRow[]>`
         select import_key, product_uid, writer, score, content, created_date, imported_at
         from ${sql(TABLE)} ${where}
-        order by imported_at desc
+        order by imported_at desc, import_key desc
         limit ${pageSize} offset ${offset}`,
       sql<{ n: string }[]>`select count(*) as n from ${sql(TABLE)} ${where}`,
     ]);
@@ -190,9 +231,14 @@ export async function listImports(
 /** 원장에서 실제 삭제에 성공한 행만 지운다. */
 export async function removeImports(shopUid: string, importKeys: string[]): Promise<void> {
   if (!importKeys.length) return;
-  await withDb(async (sql) => {
-    await sql`delete from ${sql(TABLE)} where shop_uid = ${shopUid} and import_key in ${sql(importKeys)}`;
-  });
+  const removed = await withDb(sql => sql.begin(async tx => {
+    const rows = await tx<{ dedup_hash: string | null }[]>`delete from ${tx(TABLE)} where shop_uid = ${shopUid} and import_key in ${tx(importKeys)} returning dedup_hash`;
+    const hashes = rows.flatMap(row => row.dedup_hash ? [row.dedup_hash] : []);
+    if (hashes.length) await tx`delete from ${tx(CLAIMS)} where shop_id = ${String(shopUid)} and dedup_hash in ${tx(hashes)}
+      and not exists (select 1 from ${tx(TABLE)} where shop_uid = ${shopUid} and dedup_hash = ${tx(CLAIMS)}.dedup_hash)`;
+    return true;
+  }));
+  if (!removed) throw new Error('Review storage is unavailable');
 }
 
 /** 필터에 해당하는 원장 행 키를 최대 limit개 꺼낸다. 전체 삭제 진행용(서버 순회). */

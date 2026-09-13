@@ -26,7 +26,7 @@ export type Quota = {
 export async function checkQuota(shopUid: string, want: number): Promise<Quota> {
   const sub: Subscription = await getSubscription(shopUid);
   const url = process.env.DATABASE_URL;
-  const used = url ? await readUsage(shopUid) : 0;
+  const used = url && sub.status !== 'paid' ? await readUsage(shopUid) : 0;
 
   const base: Quota = {
     allowed: 0,
@@ -48,7 +48,7 @@ export async function checkQuota(shopUid: string, want: number): Promise<Quota> 
     return { ...base, allowed: want, paid: true };
   }
   // trial — 무료 20건 유지
-  if (!url) return { ...base, allowed: want };
+  if (!url) return { ...base, allowed: 0 };
   return { ...base, allowed: Math.max(0, FREE_LIMIT - used) };
 }
 
@@ -57,31 +57,43 @@ function planDays(sub: Subscription): number {
   return sub.status === 'trial' ? TRIAL_DAYS : PLAN.termDays;
 }
 
+
+let shared: postgres.Sql | null = null;
+let schema: Promise<unknown> | null = null;
+async function usageDb() {
+  if (!process.env.DATABASE_URL) throw new Error('Usage storage unavailable');
+  shared ??= postgres(process.env.DATABASE_URL, { max: 1, idle_timeout: 20, connect_timeout: 5, connection: { statement_timeout: 5000 } });
+  const sql = shared;
+  schema ??= sql`create table if not exists makeshop_usage (
+    shop_uid text primary key, written int not null default 0, updated_at timestamptz not null default now())`.catch(error => { schema = null; throw error; });
+  await schema;
+  return sql;
+}
 async function readUsage(shopUid: string): Promise<number> {
-  const url = process.env.DATABASE_URL;
-  if (!url) return 0;
-  const sql = postgres(url, { max: 1 });
-  await sql`create table if not exists makeshop_usage (
-    shop_uid text primary key, written int not null default 0, updated_at timestamptz not null default now())`;
+  const sql = await usageDb();
   const [row] = await sql<{ written: number }[]>`select written from makeshop_usage where shop_uid = ${shopUid}`;
-  await sql.end();
   return row?.written ?? 0;
 }
-
-export async function addUsage(shopUid: string, n: number) {
-  const url = process.env.DATABASE_URL;
-  if (!url || n <= 0) return;
-  const sql = postgres(url, { max: 1 });
-  await sql`insert into makeshop_usage (shop_uid, written) values (${shopUid}, ${n})
-            on conflict (shop_uid) do update set written = makeshop_usage.written + ${n}, updated_at = now()`;
-  await sql.end();
+export async function reserveQuota(shopUid: string, n: number): Promise<{ ok: boolean; used: number }> {
+  const sql = await usageDb();
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error('Invalid reservation');
+  await sql`insert into makeshop_usage (shop_uid, written) values (${shopUid}, 0) on conflict do nothing`;
+  const [row] = await sql<{ written: number }[]>`update makeshop_usage set written = written + ${n}, updated_at = now()
+    where shop_uid = ${shopUid} and written + ${n} <= ${FREE_LIMIT} returning written`;
+  return { ok: !!row, used: row?.written ?? await readUsage(shopUid) };
 }
-
-/** 앱 삭제 시 사용량을 지운다. 무료체험 재부여는 메이크샵이 관리한다. */
+export async function releaseQuota(shopUid: string, n: number) {
+  if (n <= 0) return;
+  const sql = await usageDb();
+  await sql`update makeshop_usage set written = greatest(0, written - ${n}), updated_at = now() where shop_uid = ${shopUid}`;
+}
+export async function addUsage(shopUid: string, n: number) {
+  if (n <= 0) return;
+  const sql = await usageDb();
+  await sql`insert into makeshop_usage (shop_uid, written) values (${shopUid}, ${n})
+    on conflict (shop_uid) do update set written = makeshop_usage.written + ${n}, updated_at = now()`;
+}
 export async function resetUsage(shopUid: string) {
-  const url = process.env.DATABASE_URL;
-  if (!url) return;
-  const sql = postgres(url, { max: 1 });
+  const sql = await usageDb();
   await sql`delete from makeshop_usage where shop_uid = ${shopUid}`;
-  await sql.end();
 }

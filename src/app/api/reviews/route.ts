@@ -1,104 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sessionShop } from '@/lib/launch';
-import { getValidToken } from '@/lib/token';
-import { createReview } from '@/lib/makeshop';
-import { parseReviewFile, toDateTime, type ImportedReview } from '@/lib/reviewImport';
-import { checkQuota, addUsage, FREE_LIMIT } from '@/lib/quota';
+import { parseReviewFile, toDateTime } from '@/lib/reviewImport';
+import { identifyReviews, MAX_BATCH } from '@/lib/transferInput';
+import { POST as writeBatch } from './batch/route';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-
-const MAX_PER_REQUEST = 200; // review/store는 1건/호출. 과도한 반복 호출을 막는다
-const DELAY_MS = 150; // 연속 호출 부하 방지
-
-function toPayload(productNo: string, r: ImportedReview): {
-  save_type: string; uid: string; hname: string; content: string;
-  reg_date?: string; score_1: string; score_2: string; score_3: string; score_4: string; score_5: string; display: string;
-} {
-  const score = String(Number.isFinite(r.score) && r.score > 0 ? Math.min(5, Math.round(r.score)) : 5);
-  return {
-    save_type: 'create',
-    uid: productNo,
-    hname: r.writer || '익명',
-    content: r.option ? `${r.content}\n\n[옵션] ${r.option}` : r.content,
-    reg_date: toDateTime(r.createdAt) ?? undefined,
-    // 코멘트 평점타입은 score_1..5(1~5)가 전부 있다. 별점 노출이 score_1 단독이든 평균이든
-    // 같은 값을 넣어야 0점이 평균을 끌어내리지 않는다 (실측: score_1만 넣으면 나머지가 0으로 저장).
-    score_1: score, score_2: score, score_3: score, score_4: score, score_5: score,
-    display: 'Y',
-  };
-}
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
-  const shopUid = await sessionShop();
-  if (!shopUid) return NextResponse.json({ error: 'no session' }, { status: 401 });
-
-  const form = await req.formData();
-  const productNo = String(form.get('product_no') || '');
-  const file = form.get('file');
-  const dryRun = form.get('dry_run') === '1';
-
-  if (!productNo || !file || typeof file === 'string') {
-    return NextResponse.json({ error: 'product_no and file required' }, { status: 400 });
-  }
-
-  const buf = await (file as File).arrayBuffer();
-  const { reviews, headers } = parseReviewFile(buf);
-  if (!reviews.length) return NextResponse.json({ error: 'no reviews parsed', headers }, { status: 400 });
-
-  if (dryRun) {
-    const sample = reviews.slice(0, 3).map((r) => ({
-      writer: r.writer, content: r.content, score: r.score, createdAt: toDateTime(r.createdAt), option: r.option,
-    }));
-    return NextResponse.json({ dryRun: true, count: reviews.length, sample });
-  }
-
-  const quota = await checkQuota(shopUid, reviews.length);
-  if (quota.allowed <= 0) {
-    // 무료체험 만료(기간 종료·환불)면 paywall 신호를 실어 402로 막는다.
-    return NextResponse.json(
-      { quotaExceeded: true, paywall: quota.paywall, used: quota.used, expiredAt: quota.expiredAt, error: 'free limit reached' },
-      { status: 402 },
-    );
-  }
-
-  const token = await getValidToken(shopUid);
-  if (!token) return NextResponse.json({ error: 'token unavailable (IP allowlist?)' }, { status: 502 });
-
-  const toWrite = reviews.slice(0, Math.min(quota.allowed, MAX_PER_REQUEST));
-  let written = 0;
-  let skipped = 0;
-  const failMessage: string[] = [];
-  // 함수 시간 예산 — 60초 제한에 죽어 응답을 못 하는 것보다 남은 건을 실패로 돌려준다
-  // (cafe24-review b75caf8). 대량 이관은 /api/reviews/batch가 담당하고, 이 경로는 소량용이다.
-  const deadline = Date.now() + 45000;
-  for (const r of toWrite) {
-    if (Date.now() > deadline) {
-      skipped += 1;
-      failMessage.push('함수 시간 예산 초과 — 다시 시도해 주세요.');
-      continue;
-    }
-    try {
-      await createReview(token.access_token, shopUid, toPayload(productNo, r));
-      written += 1;
-    } catch (e) {
-      skipped += 1;
-      failMessage.push((e as Error).message.slice(0, 120));
-    }
-    await sleep(DELAY_MS);
-  }
-
-  if (!quota.paid) await addUsage(shopUid, written);
-
-  const remaining = quota.paid ? null : Math.max(0, FREE_LIMIT - quota.used - written);
-  return NextResponse.json({
-    parsed: reviews.length,
-    written,
-    skipped,
-    paid: quota.paid,
-    freeRemaining: remaining,
-    failMessage: failMessage.slice(0, 5),
-  });
+  if (!await sessionShop()) return NextResponse.json({ error: 'no session' }, { status: 401 });
+  try {
+    const form = await req.formData();
+    const file = form.get('file');
+    if (!file || typeof file === 'string') return NextResponse.json({ error: 'file required' }, { status: 400 });
+    const parsed = parseReviewFile(await file.arrayBuffer());
+    const reviews = identifyReviews(parsed.reviews);
+    if (!reviews.length) return NextResponse.json({ error: 'no reviews parsed' }, { status: 400 });
+    if (form.get('dry_run') === '1') return NextResponse.json({ dryRun: true, count: reviews.length,
+      sample: reviews.slice(0, 3).map(r => ({ ...r, createdAt: toDateTime(r.createdAt) })) });
+    if (reviews.length > MAX_BATCH) return NextResponse.json({ error: '대량 이관은 앱 화면에서 진행해 주세요.' }, { status: 400 });
+    const headers = new Headers(req.headers); headers.set('Content-Type', 'application/json'); headers.delete('content-length');
+    return writeBatch(new NextRequest(req.url, { method: 'POST', headers, body: JSON.stringify({
+      product_no: form.get('product_no'), source: form.get('source') ?? 'coupang', reviews,
+    }) }));
+  } catch (error) { return NextResponse.json({ error: (error as Error).message }, { status: 400 }); }
 }
