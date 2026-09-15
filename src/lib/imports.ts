@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'crypto';
 import postgres from 'postgres';
+import { normalizeReviewLineEndings } from './reviewImport';
 
 // Durable, platform-scoped transfer ledger. A remote write requires a persisted claim.
 // Confirmed writes deduplicate by full-file occurrence; unknown outcomes stay blocked.
@@ -32,10 +33,16 @@ export type NewImport = {
  * 주의: **보내는 값과 똑같이 정제된** 값으로 만들어야 한다(writeReviews가 만드는 원장 행
  * 그대로). 정제 전 원본으로 만들면 재전송 간 값이 어긋나 멱등이 깨진다(cafe24 2464d56 교훈).
  */
-export function reviewHash(
-  productUid: string,
-  r: { images?: string[]; sourceId?: string; writer: string; score: number; content: string; created_date?: string | null },
-): string {
+type ReviewHashInput = {
+  images?: string[];
+  sourceId?: string;
+  writer: string;
+  score: number;
+  content: string;
+  created_date?: string | null;
+};
+
+function rawReviewHash(productUid: string, r: ReviewHashInput): string {
   const parts = [
     String(productUid),
     String(r.writer ?? ''),
@@ -47,6 +54,30 @@ export function reviewHash(
   if (r.sourceId && r.sourceId !== 'occurrence:0') parts.push(r.sourceId);
   return createHash('sha256').update(parts.join('\u0000')).digest('hex');
 }
+
+/** Normalize line endings so Excel exports cannot create a second identity for one review. */
+export function reviewHash(productUid: string, r: ReviewHashInput): string {
+  return rawReviewHash(productUid, { ...r, content: normalizeReviewLineEndings(String(r.content ?? '')) });
+}
+
+/** Recognize hashes written before line-ending normalization without rewriting old ledger rows. */
+export function reviewHashAliases(productUid: string, r: ReviewHashInput): string[] {
+  const content = normalizeReviewLineEndings(String(r.content ?? ''));
+  const variants = new Set([content, content.replaceAll('\n', '\r\n')]);
+  return [...new Set([
+    rawReviewHash(productUid, r),
+    ...[...variants].map((value) => rawReviewHash(productUid, { ...r, content: value })),
+  ])];
+}
+
+export type ReviewIdentity = {
+  legacyHash: string;
+  occurrence: number;
+  /** Hashes for the source-aware identity, including historical line endings. */
+  aliases?: string[];
+  /** Hashes for the content-only legacy identity, including historical line endings. */
+  legacyAliases?: string[];
+};
 
 const TABLE = 'makeshop_review_imported';
 
@@ -144,28 +175,36 @@ export async function recordImports(shopUid: string, rows: NewImport[]): Promise
 /** Occurrence-aware legacy matching; unresolved old imports remain blocked. */
 export async function splitByExisting(
   shopId: string, productId: string, hashes: string[],
-  identities: { legacyHash: string; occurrence: number }[] = hashes.map(legacyHash => ({ legacyHash, occurrence: 0 })),
+  identities: ReviewIdentity[] = hashes.map(legacyHash => ({ legacyHash, occurrence: 0 })),
 ): Promise<{ pendingIndices: number[]; already: number; blocked: number }> {
-  const keys = [...new Set([...hashes, ...identities.map(i => i.legacyHash)])];
+  const currentAliases = hashes.map((hash, index) => [...new Set([hash, ...(identities[index]?.aliases ?? [])])]);
+  const legacyAliases = identities.map((identity) => [...new Set([identity.legacyHash, ...(identity.legacyAliases ?? [])])]);
+  const keys = [...new Set([...currentAliases.flat(), ...legacyAliases.flat()])];
   if (!keys.length) return { pendingIndices: [], already: 0, blocked: 0 };
   const result = await withDb(async (sql) => {
     const rows = await sql<{ dedup_hash: string; confirmed: boolean }[]>`
       select dedup_hash, true as confirmed from ${sql(TABLE)}
       where shop_uid = ${shopId} and product_uid = ${productId} and dedup_hash in ${sql(keys)}`;
+    const recordedHashes = new Set(rows.map((row) => row.dedup_hash));
     const claims = await sql<{ dedup_hash: string }[]>`
-      select dedup_hash from ${sql(CLAIMS)} where shop_id = ${String(shopId)} and dedup_hash in ${sql(hashes)}`;
-    const blockedHashes = new Set(claims.map(r => r.dedup_hash));
+      select dedup_hash from ${sql(CLAIMS)} where shop_id = ${String(shopId)} and dedup_hash in ${sql(keys)}`;
+    const blockedHashes = new Set(claims.map(r => r.dedup_hash).filter((hash) => !recordedHashes.has(hash)));
     const counts = new Map<string, number>();
     const unresolved = new Set<string>();
     for (const row of rows) {
       if (row.confirmed) counts.set(row.dedup_hash, (counts.get(row.dedup_hash) ?? 0) + 1);
       else unresolved.add(row.dedup_hash);
     }
+    const countAliases = (aliases: string[]) => [...new Set(aliases)].reduce((total, alias) => total + (counts.get(alias) ?? 0), 0);
     let already = 0; let blocked = 0; const pendingIndices: number[] = [];
     hashes.forEach((hash, index) => {
-      const { legacyHash, occurrence } = identities[index];
-      if ((hash !== legacyHash && counts.has(hash)) || (counts.get(legacyHash) ?? 0) > occurrence) already++;
-      else if (blockedHashes.has(hash) || unresolved.has(hash) || unresolved.has(legacyHash)) blocked++;
+      const identity = identities[index] ?? { legacyHash: hash, occurrence: 0 };
+      const exact = countAliases(currentAliases[index]);
+      const legacy = countAliases(legacyAliases[index]);
+      const currentBlocked = currentAliases[index].some((alias) => blockedHashes.has(alias) || unresolved.has(alias));
+      const legacyBlocked = legacyAliases[index].some((alias) => blockedHashes.has(alias) || unresolved.has(alias));
+      if ((hash !== identity.legacyHash && exact > 0) || legacy > identity.occurrence) already++;
+      else if (currentBlocked || legacyBlocked) blocked++;
       else pendingIndices.push(index);
     });
     return { pendingIndices, already, blocked };

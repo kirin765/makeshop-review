@@ -29,6 +29,7 @@ test('database failure prevents remote creation', async () => {
 });
 const { identifyReviews, normalizeReviews, MAX_BATCH } = loadSource('src/lib/transferInput.ts');
 const { toDateTime, parseReviewFile } = loadSource('src/lib/reviewImport.ts');
+const { reviewHash } = loadSource('src/lib/imports.ts', { postgres: () => {} });
 const { transferReviews, IMPORT_BATCH } = loadSource('src/lib/transferClient.ts');
 const { writeClaimedReviews } = loadSource('src/lib/writeClaimedReviews.ts');
 const XLSX = require('xlsx');
@@ -57,6 +58,16 @@ test('occurrence identities preserve 25,000 identical rows and canonical date eq
  assert.equal(new Set(rows.map(r=>r.sourceId)).size,25000);
  const dates=identifyReviews([{...review,createdAt:'2026-01-01'},{...review,createdAt:'2026-01-01T00:00:00+09:00'}]);
  assert.deepEqual(dates.map(r=>r.sourceId),['occurrence:0','occurrence:1']);
+});
+test('line ending variants share a hash while duplicate occurrences remain distinct', () => {
+ const lf = { product_uid: '1', writer: 'buyer', score: 5, content: 'first\nsecond', images: [], created_date: '2026-01-01' };
+ const crlf = { ...lf, content: 'first\r\nsecond' };
+ assert.equal(reviewHash('1', lf), reviewHash('1', crlf));
+ const rows = identifyReviews([
+  { ...review, content: 'first\nsecond' },
+  { ...review, content: 'first\r\nsecond' },
+ ]);
+ assert.deepEqual(rows.map(r => r.sourceId), ['occurrence:0', 'occurrence:1']);
 });
 test('partial retries send only explicitly unwritten rows and preserve totals', async () => {
  const rows=identifyReviews(Array.from({length:IMPORT_BATCH},()=>({...review}))); const calls=[];
@@ -131,6 +142,18 @@ if(platform==='godomall'){
   }finally{global.fetch=previous;}
  });
 }
+test('platform rejection messages surface after subsequent batches finish', async()=>{
+ let calls=0;
+ const reason='attachment storage full';
+ const rows=identifyReviews(Array.from({length:IMPORT_BATCH*2},(_,i)=>({...review,content:`review ${i}`})));
+ const result=await transferReviews({reviews:rows,productNo:1,startOffset:0,shouldStop:()=>false,onProgress:()=>{},pause:async()=>{},fetcher:async()=>{
+  calls++;
+  return calls===1
+   ? new Response(JSON.stringify({written:IMPORT_BATCH-1,already:0,failed:1,permanentFailed:1,retryableIndices:[],failureReason:reason}))
+   : new Response(JSON.stringify({written:IMPORT_BATCH,already:0,failed:0}));
+ }});
+ assert.equal(calls,2);assert.equal(result.written,IMPORT_BATCH*2-1);assert.equal(result.error,reason);
+});
 test('batch API rejects oversized input before storage or remote writes',async()=>{
  const route=loadSource('src/app/api/reviews/batch/route.ts',{
   '@/lib/launch':platform==='makeshop'?{sessionShop:async()=> 'shop'}:{sessionMall:async()=>({mallNo:1,accessToken:'token'})},
