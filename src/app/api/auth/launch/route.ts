@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifyLaunch, sessionCookie } from '@/lib/launch';
 import { getValidToken } from '@/lib/token';
 import { getSubscription } from '@/lib/billing';
+import { relativeRedirect } from '@/lib/http';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -26,7 +27,7 @@ export async function GET(req: NextRequest) {
   // 실패해도 (getSubscription의 폴백) 설치는 막지 않는다.
   await getSubscription(launch.shopUid).catch(() => {});
 
-  const res = NextResponse.redirect(new URL('/admin', req.url));
+  const res = relativeRedirect('/admin');
   res.cookies.set(sessionCookie(launch.shopUid));
   return res;
 }
