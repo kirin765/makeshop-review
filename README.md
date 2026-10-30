@@ -20,6 +20,15 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
   실제 메이크샵 API는 쓰지 않는다. Docker와 Chromium, Playwright가 필요하며
   `PLAYWRIGHT_MODULE_PATH`·`CHROMIUM_EXECUTABLE`로 위치를 지정할 수 있다.
 
+## 배포 (VPS)
+
+- 프로덕션: <https://makeshop-review.onnurimun.com>
+- 실행: `app-makeshop-review.service` → `/opt/apps/makeshop-review`, Next standalone, 127.0.0.1:3002
+- 배포: `/opt/vps-ops/ops.py prepare makeshop-review --patch-dir … --files …` → `activate <ID>`.
+  서비스 디렉터리에서 빌드하지 않고, 환경파일(`.env.production.local`)은 기존 위치를 유지한다.
+- 검증: `node scripts/verify-deploy.mjs` (필요 시 `VERIFY_BASE=…`).
+- Vercel 프로젝트는 롤백용으로만 남아 있다. 스토어 상세 이미지는 `store-detail.html`이 VPS를 가리킨다.
+
 ## Getting Started
 
 First, run the development server:

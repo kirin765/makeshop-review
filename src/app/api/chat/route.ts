@@ -103,7 +103,7 @@ export async function POST(req: NextRequest) {
     const origin = req.nextUrl.origin;
     const upstream = await fetch(`${BASE_URL}/chat/completions`, {
       method: 'POST',
-      // 모델 응답이 50초 안에 시작되지 않으면 중단 (Vercel maxDuration=60과 맞물림)
+      // 모델 응답이 50초 안에 시작되지 않으면 중단 (함수 maxDuration=60과 맞물림)
       signal: AbortSignal.timeout(50_000),
       headers: {
         'content-type': 'application/json',

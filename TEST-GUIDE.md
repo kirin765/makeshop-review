@@ -9,14 +9,14 @@
 
 | 항목 | 값 |
 |---|---|
-| 프로젝트 | `makeshop-review` (Next.js App Router, Vercel) |
-| 프로덕션 URL | **https://makeshop-review-gamma.vercel.app** |
+| 프로젝트 | `makeshop-review` (Next.js App Router, VPS standalone) |
+| 프로덕션 URL | **https://makeshop-review.onnurimun.com** |
 | 메이크샵 client_id | `08368787-0c51-4a6b-a4af-714154b9fc5d` |
 | client_secret | `.env`의 `MAKESHOP_CLIENT_SECRET` |
-| APP URL | `https://makeshop-review-gamma.vercel.app/` (루트) |
+| APP URL | `https://makeshop-review.onnurimun.com/` (루트) |
 | 테스트 몰 | `hello765` (파트너 기본 몰) |
 | API 경유 | 공용 프록시 `https://makeshop-proxy.sajangbu.com` (VPS egress `49.247.192.39` · 로컬 홈 egress `61.254.69.43` — 둘 다 접근 허용 IP 등록) |
-| DB | Vercel env `DATABASE_URL` (Neon Postgres) — 토큰 캐시·사용량 |
+| DB | VPS env `DATABASE_URL` (Neon Postgres) — 토큰 캐시·사용량 |
 
 **핵심 코드 파일**
 
@@ -93,18 +93,23 @@ DATABASE_URL=
 ### 3.2 접근 허용 IP 확인
 
 메이크샵 API는 개발정보 관리의 **접근 허용 IP**에 등록된 IP에서만 호출된다.
-로컬 개발은 집 공인 IP `61.254.69.43`, VPS·Vercel이 쓰는 공용 프록시는 egress `49.247.192.39`를 등록한다.
+로컬 개발은 집 공인 IP `61.254.69.43`, VPS·공용 프록시는 egress `49.247.192.39`를 등록한다.
 (2026-10-30 VPS IP 추가 등록 후 토큰 201·상품 조회 200 확인)
 
 ```bash
 curl -s https://api.ipify.org   # 로컬 공인 IP
 ```
 
-### 3.3 빌드·배포
+### 3.3 빌드·배포 (VPS)
 
 ```bash
-npm run build
-VERCEL_ORG_ID=$ORG VERCEL_PROJECT_ID=$PROJ npx vercel deploy --prod --yes
+# 1) 변경 파일만 /tmp/<patch>에 모아 전송
+ssh root@49.247.192.39 'python3 /opt/vps-ops/ops.py prepare makeshop-review \
+  --patch-dir /tmp/makeshop-patch --files <변경 파일...>'
+# 2) ready=true와 배포 ID 확인 후
+ssh root@49.247.192.39 'python3 /opt/vps-ops/ops.py activate <DEPLOY_ID>'
+# 3) 공개 URL 검증
+VERIFY_BASE=https://makeshop-review.onnurimun.com node scripts/verify-deploy.mjs
 ```
 
 ---

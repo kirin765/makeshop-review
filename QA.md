@@ -84,3 +84,22 @@ E2E는 Docker, Chromium, Playwright가 필요하다. Playwright는 `PLAYWRIGHT_M
 - 테스트 결제/환불 2쌍이 `hello765` 파트너센터 주문·환불 내역에 테스트 데이터로 남아 있다(실제 고객 결제 아님).
 - 환불 콜백의 `expired_at` 덮어쓰기 규칙 때문에 앱 설치 만료일이 기존 `9999-12-31`에서 `2026-10-30`으로 바뀌었다. 테스트 몰은 앱 자체 게이트에서도 만료 상태이며, 재사용하려면 결제로 연장해야 한다.
 - 30일이 지난 원장 행은 Makeshop 조회 API로 실제 `reg_date`를 찾을 수 없어 앱이 삭제를 거부하고 쇼핑몰 관리자에서 직접 삭제하도록 안내한다.
+
+## Vercel → VPS 이전 — 2026-10-30
+
+- 메이크샵 개발정보 관리의 **APP URL**을 `https://makeshop-review.onnurimun.com/`로 변경·저장했다.
+  - 저장 후 `GET /api/application/hello765/apps`: `app_url=https://makeshop-review.onnurimun.com/`,
+    `installed_at=2026-10-30`, `expired_at=9999-12-31`.
+  - 파트너센터 **테스트 실행** → `https://makeshop-review.onnurimun.com/admin`(shop_uid=hello765) 실제 오픈.
+  - VPS 앱은 `app-makeshop-review.service`(127.0.0.1:3002)로 동작하며, 설치는 기존 VPS 배포
+    `20261030T054910Z-6424fc` + `20261030T060341Z-96f54d`를 사용했다.
+- VPS 앱 env `MAKESHOP_APP_URL`은 이미 새 호스트를 가리키고 있었다. 남아 있던 만료 구독 캐시
+  (`makeshop_subscription`의 hello765 행)를 지워 Makeshop의 `9999-12-31`을 다시 읽게 했고,
+  `/api/billing` trial·`/api/products` 200·3개 상품을 확인했다.
+- `node scripts/verify-deploy.mjs` 통과: `/admin`·chunk 8개·`/api/billing` 401·`/api/source-survey` 401·
+  `/admin/help` 정책 안내·store 이미지 hash·옛 Vercel 호스트 미참조.
+- DNS·Cloudflare tunnel은 기존 `makeshop-review.onnurimun.com` 라우트를 그대로 사용했다(변경 없음).
+- `store-detail.html`의 절대 이미지 URL을 VPS 호스트로 바꿨다. **실제 메이크샵 스토어 상세페이지에
+  이미 붙여 넣은 HTML은 별도로 갱신해야 한다** — Vercel 프로젝트를 삭제하기 전에 확인할 것.
+- Vercel 프로젝트(`makeshop-review-gamma`)는 롤백용으로 남겨 두었다. 삭제는 스토어 상세 이미지 URL을
+  모두 VPS로 바꾼 뒤 별도로 요청해야 한다.

@@ -80,9 +80,9 @@
 1. 상품 > App > **새 APP 만들기**
 2. **기본 정보**
    - 상품명: **리뷰이사**
-   - APP URL: `https://<prod>/`
+   - APP URL: `https://makeshop-review.onnurimun.com/` (VPS)
    - URL 표시 방식: 새 창 열기
-   - **접근 허용 IP**: Vercel egress IP 등록 🔴 (없으면 API가 안 열린다)
+   - **접근 허용 IP**: VPS 프록시 egress `49.247.192.39` 등록 (없으면 API가 안 열린다)
 3. **API 권한 설정 (Scope)** — 기능에 실제 필요한 것만:
    - **상품 (read)**
    - **게시판 (read/write)** — 후기 등록

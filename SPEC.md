@@ -55,7 +55,7 @@
 | 4 | 게시판 쓰기 `requests[]` 배치 10 | **후기 1건/호출** `/review/store`, 필수 save_type·hname·content |
 | 5 | 스크립트 삽입 API로 위젯 | **삽입 API 없음** — 후기 등록 시 상품 상세에 네이티브 노출 |
 | 6 | 앱 삭제 웹훅(90077) | **웹훅 미제공** — 토큰이 5분 자동 만료라 재설치 블로커가 구조적으로 없다 |
-| 7 | IP 제한 없음 | **접근 허용 IP 등록 필수**(최대 10개) — Vercel IP 등록 필요 |
+| 7 | IP 제한 없음 | **접근 허용 IP 등록 필수**(최대 10개) — VPS 프록시 egress 등록 |
 | 8 | API 버전 헤더 | 없음 |
 | 9 | 앱스토어 유료 결제를 플랫폼이 대행 | **파트너 결제** — 결제는 우리가 받고, 결과를 **콜백 API**(`/api/application/{shop_uid}/callback/payment|refund`, 201)로 전달해야 만료일이 갱신된다. 심사 필수 (2026-08-27 반려 사유) |
 
@@ -73,7 +73,7 @@
 
 ## 스택
 
-- Next.js (App Router) + Vercel
+- Next.js (App Router) + VPS standalone (`app-makeshop-review.service`)
 - DB: Postgres (Neon) — 토큰 캐시·사용량 (`makeshop_token`·`makeshop_usage`, cafe24와 같은 DB 공유)
 - 메이크샵 connect.makeshop.co.kr API + client_credentials 토큰
 - **공용 API 프록시** (VPS 8082 + cloudflared `makeshop-proxy.sajangbu.com`) — egress = 등록 IP
@@ -81,14 +81,13 @@
 ## 운영 아키텍처 (2026-08-13 실측 확정)
 
 ```
-Vercel (makeshop-review-gamma) / VPS (makeshop-review.onnurimun.com)
-        └─HTTPS─▶ makeshop-proxy.sajangbu.com (cloudflared)
-                    └─▶ VPS 127.0.0.1:8082 (node proxy)
-                         └─▶ connect.makeshop.co.kr (egress=49.247.192.39)
+VPS (makeshop-review.onnurimun.com) ──HTTPS──▶ makeshop-proxy.sajangbu.com (cloudflared)
+                                                └─▶ VPS 127.0.0.1:8082 (node proxy)
+                                                     └─▶ connect.makeshop.co.kr (egress=49.247.192.39)
 로컬 개발 ──direct──▶ connect.makeshop.co.kr (egress=61.254.69.43)
 ```
 
-Vercel egress는 유동 IP라 메이크샵 접근 허용 IP(최대 10개)에 등록 불가 → 등록된 egress에서
+클라우드/로컬 egress는 유동·미등록 IP라 메이크샵 접근 허용 IP(최대 10개)에 등록 불가 → 등록된 egress에서
 나가는 공용 프록시를 경유한다 (고도몰 godo-proxy와 동일 패턴, `MAKESHOP_API_BASE` +
 `MAKESHOP_PROXY_TOKEN`). 프록시는 `x-proxy-token` 헤더로 인증하며 `/oauth`·`/api` 경로만 통과시킨다.
 
@@ -98,7 +97,7 @@ Vercel egress는 유동 IP라 메이크샵 접근 허용 IP(최대 10개)에 등
 |---|---|---|
 | 1 | 메이크샵 앱 client_id·client_secret | ✅ `08368787-...` / `.env` (2026-08-13) |
 | 2 | **접근 허용 IP** | ✅ `61.254.69.43`(홈)·`49.247.192.39`(VPS 프록시) 등록, VPS 토큰 201·상품 200 (2026-10-30) |
-| 3 | APP URL | ✅ `https://makeshop-review-gamma.vercel.app/` |
+| 3 | APP URL | ✅ `https://makeshop-review.onnurimun.com/` (2026-10-30 이전) |
 | 4 | **API egress 프록시** | ✅ VPS 8082 + cloudflared `makeshop-proxy.sajangbu.com` (2026-10-30 실측) |
 | 5 | 테스트 몰 | ✅ `hello765` — 설치·토큰·상품·후기 실측 통과 (2026-08-13) |
 | 6 | 후기 `score_1..5` | ✅ **전부 같은 값으로 저장**. score_1만 넣으면 나머지가 0으로 저장돼 평균 별점이 깨짐 (실측) |

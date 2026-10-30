@@ -10,7 +10,7 @@ const env = Object.fromEntries(
     .split('\n').filter(Boolean)
     .map((l) => { const i = l.indexOf('='); return [l.slice(0, i), l.slice(i + 1)]; }),
 );
-const BASE = 'https://makeshop-review-gamma.vercel.app';
+const BASE = process.env.DEMO_BASE || 'https://makeshop-review.onnurimun.com';
 const SHOP = 'hello765';
 
 const cookies = {};
