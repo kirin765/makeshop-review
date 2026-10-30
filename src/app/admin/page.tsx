@@ -1,9 +1,12 @@
 'use client';
 
+import ReviewPolicyNotice from '@/components/ReviewPolicyNotice';
+
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { prepareReviewFile } from '@/lib/reviewFileClient';
 import type { PreparedReviewFile } from '@/lib/reviewWorkerTask';
 import { IMPORT_BATCH, transferReviews } from '@/lib/transferClient';
+import SourceSurvey from './source-survey';
 
 type Product = { no: string; name: string };
 type Quota = {
@@ -617,6 +620,8 @@ export default function Admin() {
       <p className="mt-1 text-xs text-neutral-500">사진은 JPG·PNG·GIF, 최대 4장(각 500KB 이하)을 지원하며 메이크샵에서 한 장으로 합쳐 저장합니다.</p>
       <p className="mt-1 text-xs text-neutral-500">shop_uid: {shopUid}</p>
 
+      <ReviewPolicyNotice />
+
       {quota && (
         <SubscriptionCard
           quota={quota}
@@ -1008,6 +1013,15 @@ export default function Admin() {
               )}
             </div>
           )}
+
+          {result &&
+          !result.error &&
+          !result.dryRun &&
+          result.stage !== 'stopped' &&
+          (result.written ?? 0) > 0 &&
+          !result.quotaExceeded ? (
+            <SourceSurvey shopUid={shopUid} />
+          ) : null}
 
           {/* 리뷰이사가 옮긴 리뷰 관리 — 옮긴 글을 원장에 기록해 두고 필터·삭제할 수 있다 */}
           <div className="mt-8 border-t pt-4">

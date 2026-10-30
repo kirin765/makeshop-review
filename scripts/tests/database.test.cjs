@@ -140,4 +140,19 @@ test('platform transfer database integration',{skip:!url},async t=>{
   await imports.recordImports(7006,[row]);await seed`update ${seed(table)} set write_confirmed=false where mall_no=7006`;
   assert.deepEqual(await split(7006,rows),{already:0,blocked:1,pendingIndices:[]});
  });
+ if(platform==='makeshop')await t.test('self-reported source survey is once per shop and kept apart from billing',async()=>{
+  const survey=loadSource('src/lib/sourceSurvey.ts',{postgres:factory});
+  assert.equal(await survey.hasResponded('survey-shop'),false);
+  await survey.recordSource('survey-shop','makeshop-store-search');
+  assert.equal(await survey.hasResponded('survey-shop'),true);
+  // First answer wins; a later answer or skip never overwrites it.
+  await survey.recordSource('survey-shop','skipped');
+  const rows=await seed`select source, self_reported from makeshop_source_survey where shop_uid='survey-shop'`;
+  assert.deepEqual(rows.map(row=>({source:row.source,self:row.self_reported})),[{source:'makeshop-store-search',self:true}]);
+  // Another shop is a separate survey subject.
+  assert.equal(await survey.hasResponded('other-survey-shop'),false);
+  // Unknown values are rejected before any storage call, and the CHECK constraint backs it up.
+  await assert.rejects(survey.recordSource('survey-shop','utm-auto'),/invalid source/);
+  await assert.rejects(seed`insert into makeshop_source_survey (shop_uid, source) values ('bad-survey-shop','utm')`);
+ });
 });

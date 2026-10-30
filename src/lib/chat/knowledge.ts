@@ -1,3 +1,5 @@
+import { reviewPolicyChatGuidance } from '../reviewPolicy';
+
 /**
  * 리뷰이사 챗봇 지식 베이스 — 메이크샵 버전.
  * 시스템 프롬프트·추천 질문·오류 안내를 여기서 관리한다.
@@ -117,6 +119,9 @@ export function buildSystemPrompt(): string {
     '',
     '## 현재 앱 상태 (중요)',
     PLATFORM.status,
+    '',
+    '## 후기 운영 정책 공개 안내',
+    reviewPolicyChatGuidance,
     '',
     '## 오류 안내 가이드',
     '사용자가 아래 상황을 말하면 해당 안내로 답한다. 상황에 맞는 항목이 없으면, 추측하지 말고 이메일 상담을 안내한다.',

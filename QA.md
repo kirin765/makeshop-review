@@ -40,3 +40,20 @@ To reproduce the browser check, build and start the app locally, then run `node 
 Schema changes are additive and use app-specific table names. Claims never expire automatically. A crash can occur between claim creation and posting, or between posting and ledger persistence; such rows stay blocked until verified. The original complete spreadsheet and selected product are required to reconstruct occurrence hashes. Verify complete review text, writer, rating, date, options, and photos before recording a known remote success or releasing a proven non-write. Quota reservations interrupted during persistence may also require reconciliation.
 
 Transfers pause when the browser closes and resume with the same complete file. Historical orphan posts or older content alterations cannot be repaired automatically. A live paid-shop transfer of at least 25,000 reviews, including photos, stop/resume, and complete-file replay, remains pending. No live-volume stability guarantee is implied by the local tests.
+
+## 자기신고 유입 경로 — 2026-10-30
+
+`cafe24-review` 64d1b13(이관 성공 후 자기신고 유입 경로 질문)을 메이크샵 세션·DB 구조에 맞게 이식했다.
+
+- **저장**: `makeshop_source_survey`(shop_uid 기본키, source CHECK, `self_reported=true`, `responded_at`). 최초 응답만 저장하고 건너뛰기도 응답으로 기록한다. 결제 원장·사용량 테이블과 분리되어 있으며 유료 판정에 쓰지 않는다.
+- **API**: `GET /api/source-survey`는 세션 상점의 응답 여부, `POST`는 `{source}` 하나만 받아 저장한다. 세션 없음 401, 잘못된/초과 본문 400, 저장소 오류 503. 쿼리·본문의 shop_uid는 신뢰하지 않는다.
+- **UI**: 실제 등록이 1건 이상 끝난 성공 결과에서만 `source-survey.tsx`를 마운트한다. 이미 응답한 상점(DB)이나 이번 세션에서 질문을 본 경우에는 다시 띄우지 않는다. 답을 저장하지 못해도 이관·결제·재시도 흐름은 막지 않는다.
+- **선택지**: 메이크샵 앱스토어·검색 / 다른 무료 앱 / 블로그·커뮤니티 / 지인 추천 / 기타 / 건너뛰기. 카페24 전용 선택지(옵션별 상세설명·순수익 자동 계산·카페24 스토어)는 이식하지 않았다.
+
+자동 검증:
+
+- `npm test`: 라우트 인증·본문 검증·값 검증과 기존 이관 테스트 24개 통과.
+- `npm run test:db`: 일회용 PostgreSQL 17에서 최초 응답 우선, 상점별 분리, CHECK 제약, 결제와의 분리를 포함한 9개 테스트 통과.
+- `npm run test:e2e`: 일회용 PostgreSQL + 메이크샵 API mock + 프로덕션 빌드 + Chromium으로 설치 진입 → 정책 도움말 → 2건 이관 → 유입 경로 응답·DB 확인 → 재방문 시 미노출 → 원장 목록 → 선택 삭제 → 결제/환불 콜백(HTTP 201, 원 주문번호 참조) → 모바일 가로 스크롤 없음까지 확인했다. 모든 플랫폼 호출은 mock이며 실제 고객 리뷰·실제 메이크샵 API는 쓰지 않는다.
+
+E2E는 Docker, Chromium, Playwright가 필요하다. Playwright는 `PLAYWRIGHT_MODULE_PATH`, 브라우저는 `CHROMIUM_EXECUTABLE`로 지정할 수 있고, 이미 빌드된 결과를 쓰려면 `E2E_SKIP_BUILD=1`을 준다. 앱 로그는 `/tmp/makeshop-e2e-app.log`, 모바일 스크린샷은 `/tmp/makeshop-e2e-mobile.png`에 남는다.

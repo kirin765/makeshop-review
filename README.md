@@ -11,6 +11,15 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 - 설정: `OPENROUTER_API_KEY` 필수, `OPENROUTER_MODEL`(기본 `openai/gpt-4o-mini`) 선택
 - UI: `src/components/chat/ChatPanel.tsx` + `ChatWidget.tsx`
 
+## 테스트
+
+- `npm test` — 파서·이관 클라이언트·자기신고 유입 경로 라우트 단위 테스트 (외부 호출 없음)
+- `npm run test:db` — 일회용 PostgreSQL 17(Docker)에서 원장·클레임·쿼터·유입 경로 통합 테스트
+- `npm run test:e2e` — 일회용 PostgreSQL + 메이크샵 API mock + 프로덕션 빌드 + Chromium으로
+  설치 진입부터 이관·원장 삭제·결제/환불 콜백·모바일 레이아웃까지 확인한다. 실제 고객 데이터나
+  실제 메이크샵 API는 쓰지 않는다. Docker와 Chromium, Playwright가 필요하며
+  `PLAYWRIGHT_MODULE_PATH`·`CHROMIUM_EXECUTABLE`로 위치를 지정할 수 있다.
+
 ## Getting Started
 
 First, run the development server:

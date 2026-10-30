@@ -7,8 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test scripts/tests/transfer.test.cjs",
-    "test:db": "node scripts/tests/run-database.cjs"
+    "test": "node --test scripts/tests/transfer.test.cjs scripts/tests/source-survey.test.cjs",
+    "test:db": "node scripts/tests/run-database.cjs",
+    "test:e2e": "node scripts/tests/e2e-local.cjs"
   },
   "dependencies": {
     "next": "16.2.12",
