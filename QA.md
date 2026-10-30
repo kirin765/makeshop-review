@@ -71,6 +71,7 @@ E2E는 Docker, Chromium, Playwright가 필요하다. Playwright는 `PLAYWRIGHT_M
 ### 라이브 결과
 
 - 설치 앱 정보: `app_name=리뷰이사`, `app_url=https://makeshop-review-gamma.vercel.app/`, `installed_at=2026-09-29`.
+- 파트너센터 **테스트 실행** → `https://makeshop-review-gamma.vercel.app/admin`(shop_uid=hello765) 실제 오픈, 정책 안내 노출. 앱 자체 게이트는 만료 상태라 결제 안내가 표시됐다.
 - hmac launch → `/admin` 세션 발급, `/api/products` 3개 상품 조회.
 - 결제 콜백 201 → 유료 전환, `review/store` 1건 등록(`written=1`).
 - 유입 경로 `POST /api/source-survey` 204, `GET` `answered=true`, DB `self_reported=true` 확인.
