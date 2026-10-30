@@ -15,7 +15,7 @@
 | client_secret | `.env`의 `MAKESHOP_CLIENT_SECRET` |
 | APP URL | `https://makeshop-review-gamma.vercel.app/` (루트) |
 | 테스트 몰 | `hello765` (파트너 기본 몰) |
-| API 경유 | 홈서버 프록시 `https://makeshop-proxy.sajangbu.com` (egress = 등록 IP 61.254.69.43 — 2026-08-26 LAN 변경으로 변경, 재등록 필요. 이전: 218.237.176.17) |
+| API 경유 | 공용 프록시 `https://makeshop-proxy.sajangbu.com` (VPS egress `49.247.192.39` · 로컬 홈 egress `61.254.69.43` — 둘 다 접근 허용 IP 등록) |
 | DB | Vercel env `DATABASE_URL` (Neon Postgres) — 토큰 캐시·사용량 |
 
 **핵심 코드 파일**
@@ -56,7 +56,7 @@ grant_type=client_credentials&shop_uid={shop_uid}
 
 - **5분 유효**, **(shop_uid, IP)당 1분 최대 5회** — 캐시 필수. `getValidToken`이 DB에서 60초 skew로 재발급.
 - 리프레시 토큰 없음. 재발급 = 재발급.
-- ⚠️ **접근 허용 IP**: 개발정보 관리에 등록된 IP에서만 API 열림(최대 10개). Vercel egress IP를 등록해야 한다.
+- ⚠️ **접근 허용 IP**: 개발정보 관리에 등록된 IP에서만 API 열림(최대 10개). VPS 프록시 egress IP를 등록해야 한다.
 
 **상점 설치 앱 정보 조회 (선택):**
 ```
@@ -93,8 +93,8 @@ DATABASE_URL=
 ### 3.2 접근 허용 IP 확인
 
 메이크샵 API는 개발정보 관리의 **접근 허용 IP**에 등록된 IP에서만 호출된다.
-로컬 개발은 집 공인 IP를, 운영은 Vercel egress IP를 등록해야 한다.
-(2026-08-26 LAN 변경: 홈 공인 IP가 `218.237.176.17` → `61.254.69.43`으로 바뀜 — 개발자센터에 재등록 필요)
+로컬 개발은 집 공인 IP `61.254.69.43`, VPS·Vercel이 쓰는 공용 프록시는 egress `49.247.192.39`를 등록한다.
+(2026-10-30 VPS IP 추가 등록 후 토큰 201·상품 조회 200 확인)
 
 ```bash
 curl -s https://api.ipify.org   # 로컬 공인 IP
@@ -207,7 +207,7 @@ console.log(`https://<prod>/?shop_uid=${shopUid}&timestamp=${ts}&action_type=${a
 
 | # | 함정 | 증상 | 해결 |
 |---|---|---|---|
-| 1 | **접근 허용 IP 미등록** | 토큰 발급은 되는데 API가 403/401 | 개발정보 관리에 Vercel IP 등록 |
+| 1 | **접근 허용 IP 미등록** | 토큰 발급 403 access_denied | 개발정보 관리에 VPS 프록시 IP 등록 |
 | 2 | 토큰 rate limit(1분 5회) | 발급 실패 | `getValidToken`이 DB 캐시(5분)로 재사용 — 최초 1회만 발급 |
 | 3 | 카페24 코드 재사용 | hmac 불일치 401 | 메이크샵은 `shop_uid:ts:action` + hex + ±5분(ms) |
 | 4 | timestamp 초 단위로 서명 | 401 | **밀리초**여야 한다 (`Date.now()`) |
@@ -219,7 +219,7 @@ console.log(`https://<prod>/?shop_uid=${shopUid}&timestamp=${ts}&action_type=${a
 
 ## 7. 심사 재요청 전 체크리스트 (무료앱 → 유료앱 전환)
 
-- [ ] 접근 허용 IP에 Vercel egress IP 등록 (운영 필수)
+- [ ] 접근 허용 IP에 VPS 프록시 egress IP 등록 (운영 필수)
 - [ ] 파트너센터 판매 정보: 결제 방식 **유료 — 파트너 결제** + **무료체험 14일** + 가격(월 9,900원) 설정
 - [ ] 시나리오 A (설치 완주) 통과 — 상품 목록 표시
 - [ ] 시나리오 C (후기 등록) 통과 — 관리자 화면에서 확인

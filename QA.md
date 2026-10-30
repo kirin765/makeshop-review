@@ -52,8 +52,34 @@ Transfers pause when the browser closes and resume with the same complete file. 
 
 자동 검증:
 
-- `npm test`: 라우트 인증·본문 검증·값 검증과 기존 이관 테스트 24개 통과.
+- `npm test`: 라우트 인증·본문 검증·값 검증, 기존 이관 테스트, 삭제 reg_date 폴백을 포함한 28개 통과.
 - `npm run test:db`: 일회용 PostgreSQL 17에서 최초 응답 우선, 상점별 분리, CHECK 제약, 결제와의 분리를 포함한 9개 테스트 통과.
 - `npm run test:e2e`: 일회용 PostgreSQL + 메이크샵 API mock + 프로덕션 빌드 + Chromium으로 설치 진입 → 정책 도움말 → 2건 이관 → 유입 경로 응답·DB 확인 → 재방문 시 미노출 → 원장 목록 → 선택 삭제 → 결제/환불 콜백(HTTP 201, 원 주문번호 참조) → 모바일 가로 스크롤 없음까지 확인했다. 모든 플랫폼 호출은 mock이며 실제 고객 리뷰·실제 메이크샵 API는 쓰지 않는다.
 
 E2E는 Docker, Chromium, Playwright가 필요하다. Playwright는 `PLAYWRIGHT_MODULE_PATH`, 브라우저는 `CHROMIUM_EXECUTABLE`로 지정할 수 있고, 이미 빌드된 결과를 쓰려면 `E2E_SKIP_BUILD=1`을 준다. 앱 로그는 `/tmp/makeshop-e2e-app.log`, 모바일 스크린샷은 `/tmp/makeshop-e2e-mobile.png`에 남는다.
+
+## 라이브 설치·검증 — 2026-10-30
+
+실제 메이크샵 테스트 몰 `hello765`(파트너 기본 몰)에서 설치 진입부터 이관·유입 경로·삭제·결제/환불까지 실행했다. 조회·검증은 기존 설치를 사용했고, 실제 고객몰은 사용하지 않았다.
+
+### 배포
+
+- Vercel production: `76916ac` → `https://makeshop-review-gamma.vercel.app` (설치된 APP URL과 일치).
+- VPS: `20261030T054910Z-6424fc`(유입 경로·정책), `20261030T060341Z-96f54d`(삭제 폴백) prepare→activate. `https://makeshop-review.onnurimun.com`에서 `/admin`, `/admin/help` 200·`/api/source-survey` 401 확인.
+- 메이크샵 개발정보 관리의 **접근 허용 IP**에 VPS 프록시 egress `49.247.192.39`를 추가했다(기존 `61.254.69.43` 유지). 추가 전 토큰 발급은 `403 access_denied`, 추가 후 201·상품 조회 200을 확인했다.
+
+### 라이브 결과
+
+- 설치 앱 정보: `app_name=리뷰이사`, `app_url=https://makeshop-review-gamma.vercel.app/`, `installed_at=2026-09-29`.
+- hmac launch → `/admin` 세션 발급, `/api/products` 3개 상품 조회.
+- 결제 콜백 201 → 유료 전환, `review/store` 1건 등록(`written=1`).
+- 유입 경로 `POST /api/source-survey` 204, `GET` `answered=true`, DB `self_reported=true` 확인.
+- **삭제 실측 버그**: 등록 요청 `date=2026-10-30 14:55:00`과 달리 실제 저장 `reg_date=2026-10-30 14:58:18`. 원장 작성일로 삭제하니 `return_code=9999 "검색된 리뷰가 없습니다."`가 났다.
+- 수정 후: 1차 삭제 9999 → `imported_at` 전후 `/review` 조회로 실제 `reg_date` 발견 → 그 값으로 재삭제 0000 → 원장 0건. 새 리뷰를 다시 등록해 같은 create→delete 사이클을 재검증했고, Makeshop `/review` 조회에서 테스트 마커가 0건임을 확인했다.
+- 환불 콜백 201(원 결제건 `partner_order_uid` 재사용), 테스트 유입 경로 행과 원장 행은 삭제해 정리했다.
+
+### 남은 상태·부작용
+
+- 테스트 결제/환불 2쌍이 `hello765` 파트너센터 주문·환불 내역에 테스트 데이터로 남아 있다(실제 고객 결제 아님).
+- 환불 콜백의 `expired_at` 덮어쓰기 규칙 때문에 앱 설치 만료일이 기존 `9999-12-31`에서 `2026-10-30`으로 바뀌었다. 테스트 몰은 앱 자체 게이트에서도 만료 상태이며, 재사용하려면 결제로 연장해야 한다.
+- 30일이 지난 원장 행은 Makeshop 조회 API로 실제 `reg_date`를 찾을 수 없어 앱이 삭제를 거부하고 쇼핑몰 관리자에서 직접 삭제하도록 안내한다.
