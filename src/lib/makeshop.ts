@@ -135,35 +135,152 @@ export async function createReview(token: string, shopUid: string, review: Makes
 }
 
 /**
- * 코멘트 평점타입 후기 삭제 — POST /api/v1/:shopId/review/delete (개발자센터 게시판 > 후기).
- *
- * ⚠️ 실측 필요: 개발자센터 문서는 요청 본문 스키마를 명시하지 않는다. 등록 문서에
- * "리뷰 수정 시 작성일, 상품번호를 통해 리뷰가 매칭"된다고 명시돼 있어(등록=수정 동일
- * 엔드포인트), 삭제도 같은 키(uid=상품번호·hname=작성자·reg_date=작성일)로 매칭되리라
- * 보고 등록 때 보낸 값 그대로를 보낸다. 응답 형식(200 + return_code)은 등록과 같다고 본다.
+ * 코멘트 평점타입 후기 조회 — GET /api/v1/:shopId/review (최근 30일).
+ * 삭제는 등록 때 보낸 작성일이 아니라 **메이크샵이 실제 저장한 reg_date**로 매칭해야 한다.
+ * 실측(2026-10-30): 등록 date=2026-10-30 14:55:00을 보내도 reg_date는 서버 등록 시각
+ * 2026-10-30 14:58:18로 저장됐고, 14:55:00으로 삭제하면 "검색된 리뷰가 없습니다"가 났다.
+ * 날짜 파라미터는 YYYY-MM-DD 형식만 받는다(ISO·YYYYMMDD는 return_code 9013).
  */
-export type ReviewDeleteTarget = {
-  uid: string; // 상품번호
-  hname: string; // 작성자
-  reg_date?: string; // 작성일
+export type ShopReview = {
+  hname?: string;
+  uid?: string;
   content?: string;
+  reg_date?: string;
+  score_1?: string;
 };
 
-export async function deleteReview(token: string, shopUid: string, target: ReviewDeleteTarget): Promise<void> {
+export async function listReviews(
+  token: string,
+  shopUid: string,
+  opts: { from: string; to: string; uid?: string; page?: number },
+): Promise<ShopReview[]> {
+  const q = new URLSearchParams({
+    InquiryTimeFrom: opts.from,
+    InquiryTimeTo: opts.to,
+    limit: '5000',
+    page: String(opts.page ?? 1),
+  });
+  if (opts.uid) q.set('uid', opts.uid);
+  const res = await proxyFetch(`${API_BASE}/api/v1/${shopUid}/review?${q}`, { headers: merged(token) });
+  if (!res.ok) throw new Error(`review list ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const d = await res.json();
+  if (d.return_code !== '0000') throw new Error(`review list return_code=${d.return_code ?? 'missing'}`);
+  return Array.isArray(d.list) ? d.list : [];
+}
+
+function normalizedContent(value: unknown): string {
+  return String(value ?? '').replace(/\r\n?/g, '\n').trim();
+}
+
+/** 등록한 리뷰와 실제 저장된 리뷰를 본문·작성자로 대조한다. 작성일은 서버가 정한다. */
+export function pickReviewForDeletion(reviews: ShopReview[], target: ReviewDeleteTarget): ShopReview | null {
+  const content = normalizedContent(target.content);
+  if (!content) return null;
+  return (
+    reviews.find(
+      (review) =>
+        review.uid === target.uid &&
+        normalizedContent(review.content) === content &&
+        (!target.hname || review.hname === target.hname),
+    ) ?? null
+  );
+}
+
+/** KST 달력일(YYYY-MM-DD) — 메이크샵 조회 파라미터 형식. */
+function kstYmd(iso: string): string | null {
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return null;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(time));
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
+function shiftYmd(ymd: string, days: number): string {
+  const date = new Date(`${ymd}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+type DeleteResponse = { ok: boolean; notFound: boolean; message: string };
+
+/** 문서상 삭제 본문은 { reg_date, uid } 뿐이다. save_type·hname을 더 보내면 9999가 난다. */
+async function postDelete(
+  token: string,
+  shopUid: string,
+  target: { uid: string; reg_date: string },
+): Promise<DeleteResponse> {
   const res = await proxyFetch(`${API_BASE}/api/v1/${shopUid}/review/delete`, {
     method: 'POST',
     headers: merged(token),
-    body: JSON.stringify({ save_type: 'delete', ...target }),
+    body: JSON.stringify(target),
   });
   if (!res.ok) {
-    const err = new Error(`review/delete ${res.status}: ${await res.text()}`) as Error & { status?: number };
+    const err = new Error(`review/delete ${res.status}: ${(await res.text()).slice(0, 200)}`) as Error & { status?: number };
     err.status = res.status;
     throw err;
   }
   const d = await res.json();
-  unwrap('/review/delete', d);
-  const datas = d.datas ?? {};
-  if (datas.result === false) throw new Error(`review/delete rejected: ${(datas.message ?? []).join(', ')}`);
+  const message = (d.datas?.message ?? []).join(', ');
+  if (d.return_code === '0000' && d.datas?.result !== false) return { ok: true, notFound: false, message };
+  return {
+    ok: false,
+    notFound: d.return_code === '9999' && /검색된 리뷰가 없습니다/.test(message),
+    message: message || `return_code=${d.return_code ?? 'missing'}`,
+  };
+}
+
+/**
+ * 후기 삭제 — 문서에 명시된 { uid, reg_date }로 먼저 시도하고, 실패하면 실제 reg_date를
+ * 조회해 다시 지운다. 30일이 지난 리뷰는 조회 API로 확인할 수 없으므로 명시적으로 실패한다.
+ */
+export type ReviewDeleteTarget = {
+  uid: string; // 상품번호
+  hname?: string; // 작성자(마스킹)
+  reg_date?: string; // 등록 요청일 — 실제 저장일과 다를 수 있다
+  content?: string;
+  /** 앱 원장에 기록한 실제 등록 시각(ISO). 조회 범위 계산에 쓴다. */
+  importedAt?: string;
+};
+
+export async function deleteReview(token: string, shopUid: string, target: ReviewDeleteTarget): Promise<void> {
+  if (!target.reg_date) throw new Error('삭제할 리뷰의 작성일이 없습니다.');
+  const primary = await postDelete(token, shopUid, { uid: target.uid, reg_date: target.reg_date });
+  if (primary.ok) return;
+  if (!primary.notFound) throw new Error(`review/delete rejected: ${primary.message}`);
+
+  const anchor = target.importedAt ?? target.reg_date;
+  const anchorTime = Date.parse(anchor);
+  if (!Number.isFinite(anchorTime)) throw new Error('삭제할 리뷰의 등록 시각을 확인할 수 없습니다.');
+  if (Date.now() - anchorTime > 29 * 86_400_000) {
+    throw new Error('등록한 지 30일이 지나 API로 리뷰를 찾을 수 없습니다. 쇼핑몰 관리자에서 직접 삭제해 주세요.');
+  }
+  const ymd = kstYmd(anchor);
+  if (!ymd) throw new Error('삭제할 리뷰의 등록일을 확인할 수 없습니다.');
+
+  const reviews = await listReviews(token, shopUid, {
+    from: shiftYmd(ymd, -1),
+    to: shiftYmd(ymd, 1),
+    uid: target.uid,
+  });
+  const match = pickReviewForDeletion(reviews, target);
+  if (!match) {
+    // 같은 상품·작성자의 리뷰가 있는데 본문이 다르면 수정된 글이므로 지우지 않는다.
+    const sameWriter = reviews.filter((review) => !target.hname || review.hname === target.hname);
+    if (sameWriter.length) {
+      throw new Error('같은 상품·작성자의 리뷰가 있지만 본문이 달라 삭제하지 않았습니다. 쇼핑몰 관리자에서 확인해 주세요.');
+    }
+    // 메이크샵이 "검색된 리뷰가 없음"이라고 답했고 등록 시점 전후 조회에서도 없으면
+    // 이미 삭제된 것으로 본다(원장 정리 멱등).
+    return;
+  }
+  if (!match.reg_date) throw new Error('메이크샵이 리뷰 작성일을 반환하지 않았습니다.');
+  const retry = await postDelete(token, shopUid, { uid: target.uid, reg_date: match.reg_date });
+  if (!retry.ok) throw new Error(`review/delete rejected: ${retry.message}`);
 }
 
 // ---------------------------------------------------------------------------

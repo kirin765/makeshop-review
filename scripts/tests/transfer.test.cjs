@@ -175,3 +175,66 @@ test('confirmed paid plan from the server is retained in transfer progress',asyn
  const result=await transferReviews({reviews:[review],productNo:1,startOffset:0,shouldStop:()=>false,onProgress:()=>{},fetcher:async()=>new Response(JSON.stringify({written:1,already:0,failed:0,paid:true,freeRemaining:null}))});
  assert.equal(result.paid,true);assert.equal(result.freeRemaining,null);
 });
+
+if(platform==='makeshop'){
+ const deleteTarget={uid:'1100335547',hname:'buye****',content:'same review',reg_date:'2026-01-01 00:00:00',importedAt:new Date().toISOString()};
+ const notFound=()=>new Response(JSON.stringify({return_code:'9999',datas:{result:false,message:['검색된 리뷰가 없습니다.']}}));
+ const deleted=()=>new Response(JSON.stringify({return_code:'0000',datas:{result:true}}));
+ const listOf=list=>new Response(JSON.stringify({return_code:'0000',totalCount:String(list.length),count:list.length,list}));
+ async function withFetch(handler,fn){
+  const original=globalThis.fetch,calls=[];
+  globalThis.fetch=async(url,init={})=>{const call={url:String(url),body:init.body?JSON.parse(String(init.body)):null};calls.push(call);return handler(call,calls);};
+  try{await fn(calls);}finally{globalThis.fetch=original;}
+ }
+ test('deletion falls back to the actual Makeshop reg_date and sends only documented fields',async()=>{
+  await withFetch((call,calls)=>{
+   if(call.url.includes('/review/delete')) return calls.filter(c=>c.url.includes('/review/delete')).length===1?notFound():deleted();
+   if(call.url.includes('/review?')) return listOf([{uid:deleteTarget.uid,hname:deleteTarget.hname,content:deleteTarget.content,reg_date:'2026-01-01 01:02:03'}]);
+   throw new Error('unexpected '+call.url);
+  },async calls=>{
+   const {deleteReview}=loadSource('src/lib/makeshop.ts');
+   await deleteReview('token','hello765',deleteTarget);
+   const deletes=calls.filter(c=>c.url.includes('/review/delete'));
+   assert.deepEqual(deletes.map(c=>c.body),[
+    {uid:deleteTarget.uid,reg_date:'2026-01-01 00:00:00'},
+    {uid:deleteTarget.uid,reg_date:'2026-01-01 01:02:03'},
+   ]);
+   const list=calls.find(c=>c.url.includes('/review?'));
+   assert.match(list.url,/InquiryTimeFrom=\d{4}-\d{2}-\d{2}/);
+   assert.match(list.url,/InquiryTimeTo=\d{4}-\d{2}-\d{2}/);
+   assert.match(list.url,/uid=1100335547/);
+  });
+ });
+ test('an already-deleted review clears the ledger idempotently without a second delete',async()=>{
+  await withFetch((call)=>{
+   if(call.url.includes('/review/delete')) return notFound();
+   if(call.url.includes('/review?')) return listOf([]);
+   throw new Error('unexpected '+call.url);
+  },async calls=>{
+   const {deleteReview}=loadSource('src/lib/makeshop.ts');
+   await deleteReview('token','hello765',deleteTarget);
+   assert.equal(calls.filter(c=>c.url.includes('/review/delete')).length,1);
+  });
+ });
+ test('deletion refuses to guess when the review body was edited',async()=>{
+  await withFetch((call)=>{
+   if(call.url.includes('/review/delete')) return notFound();
+   if(call.url.includes('/review?')) return listOf([{uid:deleteTarget.uid,hname:deleteTarget.hname,content:'edited by merchant',reg_date:'2026-01-01 01:02:03'}]);
+   throw new Error('unexpected '+call.url);
+  },async ()=>{
+   const {deleteReview}=loadSource('src/lib/makeshop.ts');
+   await assert.rejects(deleteReview('token','hello765',deleteTarget),/본문이 달라/);
+  });
+ });
+ test('deletion older than the 30-day lookup window fails with admin guidance',async()=>{
+  await withFetch((call)=>{
+   if(call.url.includes('/review/delete')) return notFound();
+   throw new Error('must not query reviews after 30 days');
+  },async calls=>{
+   const {deleteReview}=loadSource('src/lib/makeshop.ts');
+   await assert.rejects(deleteReview('token','hello765',{...deleteTarget,importedAt:'2026-01-01T00:02:00.000Z'}),/30일/);
+   assert.equal(calls.filter(c=>c.url.includes('/review?')).length,0);
+  });
+ },);
+}
+

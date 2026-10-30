@@ -324,6 +324,8 @@ async function main() {
     await page.getByText('삭제 완료 1건').waitFor({ timeout: 30_000 });
     assert.equal(mock.state.deletes.length, 1);
     assert.equal(mock.state.deletes[0].uid, '1001');
+    assert.deepEqual(Object.keys(mock.state.deletes[0]).sort(), ['reg_date', 'uid'],
+      'review/delete must send only the documented uid/reg_date fields');
     await page.getByText(/2건 중 1–2건 · 1\/1페이지/).waitFor();
 
     // 결제/환불 콜백도 같은 세션·같은 mock으로 끝까지 확인한다.

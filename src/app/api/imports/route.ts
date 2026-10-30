@@ -31,12 +31,13 @@ const DELETE_MIN_MS = 5000;
  * 원장은 옮기기 성공 시 건 단위로 즉시 기록되므로, 새로 옮긴 글은 여기서 보인다.
  *
  * GET    : 이 상점이 옮긴 리뷰 목록 (product_no 필터 + 페이지네이션)
- * DELETE : 원장에 기록된 값을 그대로 review/delete로 보내 실제 삭제하고 원장을 정리한다.
+ * DELETE : 원장에 기록된 값을 review/delete로 보내 실제 삭제하고 원장을 정리한다.
  *          - import_keys로 보내면 최대 MAX_DELETE건만 처리한다.
  *          - all=true로 보내면 해당 필터의 원장을 최대 MAX_DELETE건씩 순회하며 삭제한다.
  *
- * ⚠️ review/delete 요청 스키마는 개발자센터 문서에 명시가 없어(실측 전) 등록 때 보낸
- *    값(상품번호·작성자·작성일)을 그대로 보낸다 — 등록 문서의 "작성일, 상품번호로 매칭" 규칙을 따른다.
+ * ⚠️ review/delete 문서상 본문은 { uid, reg_date }뿐이다. 메이크샵은 등록 요청의 date와
+ *    무관하게 실제 등록 시각을 reg_date로 저장하므로, 1차 삭제가 "검색된 리뷰가 없음"이면
+ *    등록 시점(imported_at) 전후를 조회해 실제 reg_date로 다시 지운다 (makeshop.ts).
  */
 export async function GET(req: NextRequest) {
   const shopUid = await sessionShop();
@@ -108,6 +109,7 @@ export async function DELETE(req: NextRequest) {
           hname: row.writer,
           reg_date: row.created_date ?? undefined,
           content: row.content,
+          importedAt: row.imported_at.toISOString(),
         });
         return { ok: true, error: '' };
       } catch (e) {
